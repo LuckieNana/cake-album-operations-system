@@ -130,10 +130,32 @@ p, span, div, label, .stMarkdown, [data-testid='stWidgetLabel'] p{color:var(--in
 .ca-kpi .note{font-size:.82rem; color:var(--muted)!important; font-weight:500;}
 
 /* Inputs */
-input,textarea,div[data-baseweb='select']>div{background:var(--surface)!important; color:var(--ink)!important;
+input,textarea{background:var(--surface)!important; color:var(--ink)!important;
   border-color:var(--border-strong)!important; border-radius:8px!important;}
 input:focus,textarea:focus{border-color:var(--plum)!important; box-shadow:0 0 0 3px rgba(75,42,92,.12)!important;}
-div[data-baseweb='select']:focus-within>div{border-color:var(--plum)!important; box-shadow:0 0 0 3px rgba(75,42,92,.12)!important;}
+
+/* Dropdown menus (selectbox/multiselect) — light purple, everywhere, no gaps.
+   This Streamlit version renders these under [data-testid='stSelectbox'] /
+   [data-testid='stMultiSelect'] for the closed box and [data-testid='stSelectboxVirtualDropdown']
+   for the open option list — NOT the older data-baseweb attributes (kept below as a fallback
+   for other Streamlit versions that still use them). */
+[data-testid='stSelectbox'], [data-testid='stSelectbox'] *,
+[data-testid='stMultiSelect'], [data-testid='stMultiSelect'] *,
+div[data-baseweb='select'], div[data-baseweb='select'] *{
+  background-color:#F0E6F5!important; color:#1A1420!important;}
+
+[data-testid='stSelectboxVirtualDropdown'], [data-testid='stSelectboxVirtualDropdown'] *,
+div[data-baseweb='popover'], div[data-baseweb='popover'] *,
+div[data-baseweb='menu'], div[data-baseweb='menu'] *,
+ul[role='listbox'], ul[role='listbox'] *,
+div[role='listbox'], div[role='listbox'] *{
+  background-color:#F0E6F5!important; color:#1A1420!important;}
+
+[data-testid='stSelectboxVirtualDropdown'] [role='option']:hover,
+[data-testid='stSelectboxVirtualDropdown'] [role='option'][aria-selected='true'],
+div[role='option']:hover, li[role='option']:hover,
+div[role='option'][aria-selected='true'], li[role='option'][aria-selected='true']{
+  background-color:#DCC5EC!important; color:#1A1420!important;}
 
 /* Buttons: solid, restrained, confident, and readable */
 .stButton>button,.stFormSubmitButton>button{border-radius:8px; font-weight:700; min-height:40px;
@@ -393,13 +415,15 @@ def verify_password(password: str, salt: str, expected_hash: str) -> bool:
 
 def ensure_bootstrap_admin():
     """If there are no staff accounts yet (brand new install), create one bootstrap
-    Owner/Admin account so someone can log in and start adding real staff accounts."""
+    Owner/Admin account so someone can log in and start adding real staff accounts.
+    Uses INSERT OR IGNORE so this is safe even if two sessions run this at the same
+    moment on first startup (a real race condition seen on Streamlit Cloud)."""
     with connect() as conn:
         count = conn.execute("SELECT COUNT(*) FROM staff_accounts").fetchone()[0]
         if count == 0:
             digest, salt = hash_password("admin123")
             conn.execute(
-                "INSERT INTO staff_accounts(username, full_name, password_hash, salt, department, departments, is_hod, is_active, created_at, created_by) "
+                "INSERT OR IGNORE INTO staff_accounts(username, full_name, password_hash, salt, department, departments, is_hod, is_active, created_at, created_by) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 ("admin", "Administrator", digest, salt, "Owner / Admin", "Owner / Admin", "Yes", "Yes", now_iso(), "System Bootstrap"))
             conn.commit()
@@ -470,7 +494,9 @@ def apply_staff_name_corrections():
 
 def ensure_default_staff_roster():
     """One-time setup: creates the real staff accounts from the agreed roster, skipping
-    any username that already exists (so this is safe to run on every startup)."""
+    any username that already exists (so this is safe to run on every startup).
+    Uses INSERT OR IGNORE as a second layer of protection against the same kind of
+    race condition fixed in ensure_bootstrap_admin()."""
     with connect() as conn:
         existing = {r[0] for r in conn.execute("SELECT username FROM staff_accounts").fetchall()}
         digest, salt = hash_password(DEFAULT_STAFF_PASSWORD)
@@ -478,7 +504,7 @@ def ensure_default_staff_roster():
             if username in existing:
                 continue
             conn.execute(
-                "INSERT INTO staff_accounts(username, full_name, password_hash, salt, department, departments, is_hod, is_active, created_at, created_by) "
+                "INSERT OR IGNORE INTO staff_accounts(username, full_name, password_hash, salt, department, departments, is_hod, is_active, created_at, created_by) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (username, full_name, digest, salt, departments[0], ",".join(departments),
                  "Yes" if is_hod else "No", "Yes", now_iso(), "System Roster Setup"))
@@ -519,6 +545,18 @@ def authenticate(username: str, password: str):
         conn.commit()
         return True, "OK", row
 
+
+
+def safe_add_column(conn, table, col_name, col_def):
+    """Adds a column if it doesn't already exist. Safe to call even if another
+    concurrent session is doing the exact same thing at the same moment — a real
+    race condition seen on Streamlit Cloud's cold start, where the app can briefly
+    run its startup code more than once at nearly the same time."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
 
 
 def ensure_base_schema():
@@ -575,7 +613,7 @@ def ensure_base_schema():
             "repayment_recorded_by": "TEXT", "repayment_recorded_at": "TEXT",
         }.items():
             if col_name not in existing_comp:
-                conn.execute(f"ALTER TABLE complaints ADD COLUMN {col_name} {col_def}")
+                safe_add_column(conn, "complaints", col_name, col_def)
         conn.execute("""CREATE TABLE IF NOT EXISTS delivery_runs(
             id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, driver_name TEXT, run_status TEXT,
             run_started_at TEXT, run_completed_at TEXT, created_at TEXT, created_by TEXT)""")
@@ -610,7 +648,7 @@ def ensure_base_schema():
             created_at TEXT NOT NULL, created_by TEXT, last_login_at TEXT)""")
         existing_acct = {r[1] for r in conn.execute("PRAGMA table_info(staff_accounts)").fetchall()}
         if "departments" not in existing_acct:
-            conn.execute("ALTER TABLE staff_accounts ADD COLUMN departments TEXT")
+            safe_add_column(conn, "staff_accounts", "departments", "TEXT")
         conn.execute("UPDATE staff_accounts SET departments = department WHERE departments IS NULL OR departments = ''")
         conn.commit()
 
@@ -651,7 +689,7 @@ def ensure_release_2_schema():
         }
         for name, definition in additions.items():
             if name not in existing:
-                conn.execute(f"ALTER TABLE orders ADD COLUMN {name} {definition}")
+                safe_add_column(conn, "orders", name, definition)
 
         conn.execute("""
         CREATE TABLE IF NOT EXISTS baked_cake_inventory(
@@ -673,7 +711,7 @@ def ensure_release_2_schema():
         )""")
         existing_inv = {r[1] for r in conn.execute("PRAGMA table_info(baked_cake_inventory)").fetchall()}
         if "layers_available" not in existing_inv:
-            conn.execute("ALTER TABLE baked_cake_inventory ADD COLUMN layers_available INTEGER")
+            safe_add_column(conn, "baked_cake_inventory", "layers_available", "INTEGER")
         conn.execute("""
         CREATE TABLE IF NOT EXISTS extra_baking_assignments(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -725,7 +763,7 @@ def ensure_release_2_schema():
         order_cols_24 = {r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()}
         for name, definition in topper_cols.items():
             if name not in order_cols_24:
-                conn.execute(f"ALTER TABLE orders ADD COLUMN {name} {definition}")
+                safe_add_column(conn, "orders", name, definition)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS notifications(
             id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT, target_department TEXT NOT NULL,
@@ -734,7 +772,7 @@ def ensure_release_2_schema():
         )""")
         existing_notif = {r[1] for r in conn.execute("PRAGMA table_info(notifications)").fetchall()}
         if "acknowledged_by" not in existing_notif:
-            conn.execute("ALTER TABLE notifications ADD COLUMN acknowledged_by TEXT")
+            safe_add_column(conn, "notifications", "acknowledged_by", "TEXT")
 
         conn.execute("""
         CREATE TABLE IF NOT EXISTS daily_flavour_availability(
@@ -763,9 +801,9 @@ def ensure_release_2_schema():
         )""")
         existing_smu = {r[1] for r in conn.execute("PRAGMA table_info(stage_material_usage)").fetchall()}
         if "colour" not in existing_smu:
-            conn.execute("ALTER TABLE stage_material_usage ADD COLUMN colour TEXT")
+            safe_add_column(conn, "stage_material_usage", "colour", "TEXT")
         if "size" not in existing_smu:
-            conn.execute("ALTER TABLE stage_material_usage ADD COLUMN size TEXT")
+            safe_add_column(conn, "stage_material_usage", "size", "TEXT")
         conn.commit()
 
 
@@ -2968,13 +3006,17 @@ def render_staff_accounts():
             else:
                 digest, salt = hash_password(new_password)
                 with connect() as conn:
-                    conn.execute(
-                        "INSERT INTO staff_accounts(username, full_name, password_hash, salt, department, departments, is_hod, is_active, created_at, created_by) "
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO staff_accounts(username, full_name, password_hash, salt, department, departments, is_hod, is_active, created_at, created_by) "
                         "VALUES(?,?,?,?,?,?,?,?,?,?)",
                         (uname, new_fullname.strip(), digest, salt, new_depts[0], ",".join(new_depts),
                          "Yes" if new_hod else "No", "Yes", now_iso(), st.session_state.get("staff_name", "Admin")))
                     conn.commit()
-                st.success(f"Account '{uname}' created for {new_fullname.strip()} ({', '.join(new_depts)})."); st.rerun()
+                    created = cur.rowcount > 0
+                if created:
+                    st.success(f"Account '{uname}' created for {new_fullname.strip()} ({', '.join(new_depts)})."); st.rerun()
+                else:
+                    st.error(f"Username '{uname}' was just taken (possibly by someone else at the same moment) — pick another.")
 
     if accounts.empty:
         st.info("No staff accounts yet besides the bootstrap admin.")
