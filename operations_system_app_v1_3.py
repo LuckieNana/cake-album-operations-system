@@ -12,6 +12,7 @@ import uuid
 import hashlib
 import base64
 import time
+import json
 import secrets as secrets_mod
 from pathlib import Path
 from datetime import datetime, date, time as dtime, timedelta
@@ -64,6 +65,9 @@ STANDARD_FLAVOURS = ["Vanilla", "Chocolate", "Red Velvet", "Lemon", "Coconut", "
                      "Blueberry", "Butterscotch", "Raspberry", "Caramel", "Marble", "Carrot", "Black Forest",
                      "Fruit Cake", "Other"]
 STANDARD_CAKE_SIZES = ["6", "8", "9", "10", "12", "14", "16", "18", "20", "Custom"]
+CAKE_CATEGORIES = ["Wedding", "Birthday", "Baby Shower", "Bridal Shower", "Introduction / Kuhingira",
+                    "Graduation", "Christmas", "New Year's", "Baptism", "Confirmation", "Holy Communion",
+                    "Corporate Event", "Other"]
 DOZEN_COUNTS = {"Half Dozen (6)": 6, "1 Dozen (12)": 12, "2 Dozens (24)": 24, "3 Dozens (36)": 36, "4 Dozens (48)": 48}
 
 DEPARTMENT_NAMES = [
@@ -743,6 +747,11 @@ def ensure_release_2_schema():
             "dozens_quantity": "REAL",
             "sold_from_inventory": "TEXT DEFAULT 'No'",
             "reference_image_base64": "TEXT",
+            "cake_category": "TEXT",
+            "is_multi_tier": "TEXT DEFAULT 'No'",
+            "tier_count": "INTEGER DEFAULT 1",
+            "tier_details_json": "TEXT",
+            "reference_images_json": "TEXT",
             "inventory_batch_id": "INTEGER",
         }
         for name, definition in additions.items():
@@ -1307,6 +1316,7 @@ def order_card(row, extra=None):
         size = f"<b>Quantity:</b> {disp(pieces)} pieces ({dozens_txt})<br>"
     if row.get("sold_from_inventory") == "Yes":
         size += "<b>🍪 Sold from shelf inventory</b><br>"
+    is_urgent = str(row.get("urgency_level")) == "Urgent"
     urgency = disp(row.get("urgency_level"))
     urgency_html = f"<b>Urgency:</b> {'🚨 ' if urgency=='Urgent' else ''}{urgency}<br>" if urgency != "—" else ""
     qty = disp(row.get("order_quantity"))
@@ -1317,9 +1327,14 @@ def order_card(row, extra=None):
     window_html = ""
     if disp(row.get("delivery_window_start")) != "—" and disp(row.get("delivery_window_end")) != "—":
         window_html = f"<b>Delivery Window:</b> {row.get('delivery_window_start')} – {row.get('delivery_window_end')}<br>"
-    html = ["<div class='ca-card'>"]
+    card_style = "class='ca-card'" if not is_urgent else "class='ca-card' style='border:3px solid #C81E1E;background:#FBEAEA;'"
+    html = [f"<div {card_style}>"]
+    if is_urgent:
+        html.append("<div style='background:#C81E1E;color:#fff;font-weight:900;padding:4px 10px;border-radius:6px;display:inline-block;margin-bottom:8px;'>🚨 URGENT — HANDLE WITH PRIORITY UNTIL DELIVERED</div><br>")
     html.append(f"{product_badge}<br><br><b style='font-size:1.1rem'>{disp(row.get('customer_name'))}</b> · {disp(row.get('order_id'))}<br><br>")
     html.append(urgency_html)
+    if disp(row.get("cake_category")) not in ("—", "N/A"):
+        html.append(f"<b>Occasion:</b> {disp(row.get('cake_category'))}<br>")
     html.append(qty_html)
     html.append(f"<b>Flavours:</b> {disp(row.get('flavours'))}<br>{size}")
     if ptype == "Cake":
@@ -1333,14 +1348,41 @@ def order_card(row, extra=None):
             html.append(f"<b>{label}:</b> {disp(value)}<br>")
     html.append("</div>")
     st.markdown("".join(html), unsafe_allow_html=True)
-    img_b64 = row.get("reference_image_base64")
-    path = row.get("reference_image_path")
-    if img_b64 and isinstance(img_b64, str) and img_b64.startswith("data:image"):
-        st.markdown("**📷 Customer Reference Image**")
-        st.image(img_b64, caption="What the customer wants — refer to this at every stage", width=420)
-    elif path and isinstance(path, str) and Path(path).exists():
-        st.markdown("**📷 Customer Reference Image**")
-        st.image(path, caption="What the customer wants — refer to this at every stage", width=420)
+
+    if str(row.get("is_multi_tier")) == "Yes" and row.get("tier_details_json"):
+        try:
+            tiers = json.loads(row["tier_details_json"])
+            if tiers:
+                st.markdown("**🎂 Tier Breakdown**")
+                tier_df = pd.DataFrame(tiers)
+                tier_df.columns = [c.title() for c in tier_df.columns]
+                st.dataframe(tier_df, hide_index=True, use_container_width=True)
+        except Exception:
+            pass
+
+    images_shown = False
+    images_json = row.get("reference_images_json")
+    if images_json:
+        try:
+            all_imgs = json.loads(images_json)
+            if all_imgs:
+                st.markdown(f"**📷 Customer Reference Image(s)** — {len(all_imgs)} uploaded")
+                cols = st.columns(min(len(all_imgs), 3))
+                for i, data_uri in enumerate(all_imgs):
+                    with cols[i % len(cols)]:
+                        st.image(data_uri, caption=f"Reference {i+1}", width=280)
+                images_shown = True
+        except Exception:
+            pass
+    if not images_shown:
+        img_b64 = row.get("reference_image_base64")
+        path = row.get("reference_image_path")
+        if img_b64 and isinstance(img_b64, str) and img_b64.startswith("data:image"):
+            st.markdown("**📷 Customer Reference Image**")
+            st.image(img_b64, caption="What the customer wants — refer to this at every stage", width=420)
+        elif path and isinstance(path, str) and Path(path).exists():
+            st.markdown("**📷 Customer Reference Image**")
+            st.image(path, caption="What the customer wants — refer to this at every stage", width=420)
 
 
 def table(df, columns):
@@ -1354,18 +1396,29 @@ def table(df, columns):
 def render_queue_table(df_subset, title="Jobs In Queue", extra_columns=None):
     """Show every job currently sitting at this stage, not just the one selected below,
     so staff can see the full workload instead of assuming there is only one job.
-    Numbered in order of due date/time so everyone can see the order jobs should be tackled in."""
-    base_cols = ["#", "order_id", "product_type", "customer_name", "order_type", "urgency_level", "priority",
+    Urgent orders are pinned to the top and clearly marked — Streamlit's tables can't
+    show actual red cell backgrounds (they're canvas-rendered, not real HTML), so this
+    is the reliable way to make urgency impossible to miss."""
+    base_cols = ["#", "🚨", "order_id", "product_type", "customer_name", "order_type", "urgency_level", "priority",
                  "due_date", "expected_time", "workflow_status"]
     cols = base_cols + (extra_columns or [])
-    st.markdown(f"#### 📋 {title} — {len(df_subset)} job(s) waiting")
+    urgent_count = int((df_subset["urgency_level"] == "Urgent").sum()) if df_subset is not None and not df_subset.empty and "urgency_level" in df_subset.columns else 0
+    title_suffix = f" — 🚨 {urgent_count} URGENT" if urgent_count > 0 else ""
+    st.markdown(f"#### 📋 {title} — {len(df_subset)} job(s) waiting{title_suffix}")
     if df_subset is None or df_subset.empty:
         st.caption("Nothing waiting here right now — you're all caught up.")
         return
     ordered = df_subset.copy()
+    ordered["_is_urgent"] = (ordered["urgency_level"] == "Urgent") if "urgency_level" in ordered.columns else False
+    sort_cols = ["_is_urgent"]
+    sort_asc = [False]
     if "due_date" in ordered.columns:
-        ordered = ordered.sort_values(["due_date", "expected_time"] if "expected_time" in ordered.columns else ["due_date"])
+        sort_cols.append("due_date"); sort_asc.append(True)
+    if "expected_time" in ordered.columns:
+        sort_cols.append("expected_time"); sort_asc.append(True)
+    ordered = ordered.sort_values(sort_cols, ascending=sort_asc)
     ordered.insert(0, "#", range(1, len(ordered) + 1))
+    ordered.insert(1, "🚨", ordered["_is_urgent"].map(lambda u: "🚨 URGENT" if u else ""))
     table(ordered, cols)
 
 
@@ -1390,16 +1443,31 @@ DEPARTMENT_STAFF_COLUMN = {
 
 
 def can_act_on(row, staff_column):
-    """Everyone in the department can VIEW any job, but only the person actually assigned
-    to it (or a Head of Department, or anyone if nobody's been assigned yet) can act on it —
-    so buttons stay visible for context but are disabled for people who aren't the owner."""
+    """Everyone in the department can VIEW any job, but only a person actually assigned
+    to it can act on it — or a Head of Department, or anyone if nobody's assigned yet.
+    Assignment can now be more than one person (comma-separated), for bulk orders that
+    need multiple hands — being any one of the assigned people is enough to act."""
     if st.session_state.get("is_hod"):
         return True
-    assigned = str(row.get(staff_column) or "").strip()
-    if not assigned or assigned == "—":
+    assigned_raw = str(row.get(staff_column) or "").strip()
+    if not assigned_raw or assigned_raw == "—":
         return True
+    assigned_list = [a.strip() for a in assigned_raw.split(",") if a.strip()]
     me = st.session_state.get("staff_name", "").strip()
-    return assigned == me
+    return me in assigned_list
+
+
+def render_multi_assign(row, staff_column, role_label, staff_options, widget_key):
+    """Lets the currently-assigned person(s) — or an HOD — add or remove people working
+    this specific job, for bulk orders where one person isn't enough."""
+    current = [s.strip() for s in str(row.get(staff_column) or "").split(",") if s.strip()]
+    st.markdown(f"##### 👥 {role_label}(s) Assigned to This Job")
+    st.caption("For bulk orders needing more than one person — add or remove names below.")
+    updated = st.multiselect(f"{role_label}(s) on this job", staff_options, default=[c for c in current if c in staff_options], key=f"multiassign_{widget_key}")
+    if st.button(f"Update {role_label} Assignment", key=f"multiassign_btn_{widget_key}"):
+        joined = ", ".join(updated) if updated else ""
+        update_order(row.order_id, {staff_column: joined}, st.session_state.get("staff_name", "System"), f"{role_label} Assignment Updated", role_label)
+        st.success("Assignment updated."); st.rerun()
 
 
 def render_hod_overview(department_name, df):
@@ -1541,6 +1609,10 @@ def render_customer_care():
     product_type = st.selectbox("What is this order for?", PRODUCT_TYPES, key="nc_product_type",
                                  help="Cookies, Cake Loaves, Cake Layers, and Cupcakes skip Piling/Covering/Decoration/Studio QC and go straight from Baking to Packaging.")
 
+    cake_category = "N/A"
+    if product_type == "Cake":
+        cake_category = st.selectbox("Cake Category / Occasion", CAKE_CATEGORIES, key="nc_cake_category")
+
     size_mode = PRODUCT_SIZE_MODE.get(product_type, "inches")
     size_value, shape, cake_format, icing_type = 0.0, "N/A", "Full Cake", "N/A"
     size_category = "N/A"
@@ -1559,6 +1631,30 @@ def render_customer_care():
         size_category = st.selectbox("Size", ["Small", "Medium", "Big"], key="nc_size_cat_cookie")
     elif size_mode == "category_small_med_large":
         size_category = st.selectbox("Size", ["Small", "Medium", "Large"], key="nc_size_cat_loaf")
+
+    is_multi_tier = "No"
+    tier_count = 1
+    tier_details = []
+    tier_total = 0.0
+    if product_type == "Cake":
+        st.markdown("### Tiers")
+        is_multi_tier = st.selectbox("Is this a multi-tier cake? (e.g. wedding cake)", ["No", "Yes"], key="nc_multi_tier")
+        if is_multi_tier == "Yes":
+            tier_count = st.selectbox("Number of Tiers", [2, 3, 4, 5, 6], key="nc_tier_count")
+            st.caption("Enter each tier separately — flavour, pan/circle size (diameter), height, and price. "
+                       "Pan size is the width of the circle (6\"–18\", or Other for anything bigger/different).")
+            for i in range(1, int(tier_count) + 1):
+                st.markdown(f"**Tier {i}**")
+                a, b, c, d = st.columns(4)
+                t_flavour_choice = a.selectbox("Flavour", STANDARD_FLAVOURS, key=f"nc_tier_{i}_flavour")
+                t_flavour = a.text_input("Specify flavour", key=f"nc_tier_{i}_flavour_other") if t_flavour_choice == "Other" else t_flavour_choice
+                t_size_choice = b.selectbox("Pan Size (inches)", STANDARD_CAKE_SIZES, key=f"nc_tier_{i}_size")
+                t_size = b.number_input("Specify size (inches)", min_value=0.0, step=0.5, value=8.0, key=f"nc_tier_{i}_size_other") if t_size_choice == "Custom" else float(t_size_choice)
+                t_height = c.number_input("Height (inches)", min_value=0.0, step=0.5, value=6.0, key=f"nc_tier_{i}_height")
+                t_price = d.number_input("Price (UGX)", min_value=0, step=5000, key=f"nc_tier_{i}_price")
+                tier_details.append({"tier": i, "flavour": t_flavour, "size": t_size, "height": t_height, "price": t_price})
+                tier_total += t_price
+            st.info(f"**Total (all {tier_count} tiers):** UGX {tier_total:,.0f}")
 
     sold_from_inventory = "No"
     inventory_batch_id = None
@@ -1580,7 +1676,14 @@ def render_customer_care():
 
     st.markdown("### Order Price")
     dozens_qty = 0
-    if product_type == "Cupcakes":
+    if is_multi_tier == "Yes":
+        st.caption("Price is the sum of all tier prices entered above.")
+        price = tier_total
+        total_price = tier_total
+        order_quantity = 1
+        is_bulk_order = "No"
+        st.info(f"**Total Cost (all tiers):** UGX {total_price:,.0f}")
+    elif product_type == "Cupcakes":
         st.caption("Cupcakes are sold by the dozen — pick a quantity and the price per dozen; the total is calculated automatically.")
         a, b = st.columns(2)
         dozens_choice = a.selectbox("Quantity", DOZEN_OPTIONS, key="nc_dozens_choice")
@@ -1622,7 +1725,8 @@ def render_customer_care():
                                       index=1 if order_type == "Urgent / Abrupt Order" else 0)
 
         design = st.text_area("Description of Design *" if product_type not in SHORT_PIPELINE_PRODUCTS else "Order Notes *")
-        img = st.file_uploader("Customer Reference Image", type=["jpg","jpeg","png"])
+        imgs = st.file_uploader("Customer Reference Image(s)", type=["jpg","jpeg","png"], accept_multiple_files=True,
+                                 help="Upload more than one if the instructions call for combining ideas from different images (e.g. one for the cake, another for the topper style).")
 
         if product_type == "Cake":
             st.markdown("### Topper Requirements")
@@ -1684,14 +1788,19 @@ def render_customer_care():
         order_id = generate_order_id()
         image_path = ""
         image_base64 = ""
-        if img is not None:
-            suffix = Path(img.name).suffix.lower()
-            target = REFERENCE_IMAGE_DIR / f"{order_id}{suffix}"
-            img_bytes = img.getbuffer()
+        all_images_b64 = []
+        for idx, one_img in enumerate(imgs or []):
+            suffix = Path(one_img.name).suffix.lower()
+            target = REFERENCE_IMAGE_DIR / f"{order_id}_{idx}{suffix}"
+            img_bytes = one_img.getbuffer()
             target.write_bytes(img_bytes)
-            image_path = str(target)
             mime = "image/png" if suffix == ".png" else "image/jpeg"
-            image_base64 = f"data:{mime};base64,{base64.b64encode(bytes(img_bytes)).decode()}"
+            data_uri = f"data:{mime};base64,{base64.b64encode(bytes(img_bytes)).decode()}"
+            all_images_b64.append(data_uri)
+            if idx == 0:
+                image_path = str(target)
+                image_base64 = data_uri
+        images_json = json.dumps(all_images_b64) if all_images_b64 else ""
 
         balance = max(total_price - amount_paid, 0)
         if payment_arrangement == "No Deposit / Pay on Delivery":
@@ -1718,6 +1827,8 @@ def render_customer_care():
             "cake_format": cake_format, "icing_type": icing_type,
             "number_of_layers": final_layers, "system_suggested_layers": suggested,
             "final_approved_layers": final_layers, "reference_image_path": image_path, "reference_image_base64": image_base64,
+            "reference_images_json": images_json, "cake_category": cake_category,
+            "is_multi_tier": is_multi_tier, "tier_count": int(tier_count), "tier_details_json": json.dumps(tier_details) if tier_details else "",
             "order_type": order_type, "inventory_check_required": inventory_check,
             "delivery_window_start": str(delivery_window_start), "delivery_window_end": str(delivery_window_end),
             "topper_required": topper_required, "topper_wording": topper_wording.strip() if topper_required=="Yes" else "",
@@ -1984,46 +2095,7 @@ def render_production_planning():
         table(df[df["workflow_status"].isin(pipeline_statuses)] if "workflow_status" in df.columns else df.iloc[0:0],
               ["order_id","customer_name","urgency_level","baker_assigned","piler_assigned","coverer_assigned","decorator_assigned","workflow_status","next_action"])
 
-    st.markdown("### Extra Cake Layers for the Day (Abrupt/Buffer Stock)")
-    st.caption("Production Planning decides extra layers to bake ahead for abrupt/urgent clients. Bakers execute the assignment.")
-    a,b,c,d = st.columns(4)
-    plan_date = a.date_input("Plan Date", value=date.today(), key="pp_extra_date")
-    extra_flavour_choice = b.selectbox("Flavour", STANDARD_FLAVOURS, key="pp_extra_flavour_choice")
-    extra_flavour = st.text_input("Specify flavour", key="pp_extra_flavour_other") if extra_flavour_choice == "Other" else extra_flavour_choice
-    extra_size_choice = c.selectbox("Cake Size (inches)", STANDARD_CAKE_SIZES, key="pp_extra_size_choice")
-    extra_size = st.number_input("Specify size (inches)", min_value=0.0, step=0.5, value=8.0, key="pp_extra_size_other") if extra_size_choice == "Custom" else float(extra_size_choice)
-    extra_shape = d.selectbox("Shape", ["Round","Rectangle","Square","Heart","Custom"], key="pp_extra_shape")
-    a,b,c,d,e = st.columns(5)
-    layers_per_cake = a.number_input("Layers per Cake", min_value=1, step=1, value=3, key="pp_extra_layers")
-    cake_units = b.number_input("Number of Cake Units to Bake", min_value=1, step=1, value=1, key="pp_extra_units")
-    total_layers = int(layers_per_cake) * int(cake_units)
-    c.metric("Total Layers", total_layers)
-    _bakers_dd,_,_,_,_ = staff_lists()
-    assigned_baker = d.selectbox("Assigned Baker", _bakers_dd, key="pp_extra_baker")
-    reason = e.selectbox("Reason", ["Abrupt client buffer","Expected demand","Corporate orders","Wedding support","Other"], key="pp_extra_reason")
-    created_by = st.text_input("Planned by", value=st.session_state.get("staff_name", "Production Manager"), key="pp_extra_by")
-    if st.button("Assign Extra Baking to Baker", use_container_width=True, key="pp_extra_btn"):
-        if not str(extra_flavour).strip():
-            st.error("Enter the flavour.")
-        else:
-            with connect() as conn:
-                conn.execute("""INSERT INTO extra_baking_assignments(plan_date,flavour,cake_size_value,cake_shape,layers_per_cake,
-                                cake_units,total_layers,assigned_baker,reason,assignment_status,created_by,created_at)
-                                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                             (str(plan_date), str(extra_flavour).strip(), extra_size, extra_shape, int(layers_per_cake),
-                              int(cake_units), total_layers, assigned_baker, reason, "Assigned", created_by, now_iso()))
-                conn.commit()
-            audit_log(None, "Extra Baking Assigned", "Production Planning",
-                      f"{cake_units} {extra_size}\" {extra_shape} {extra_flavour} cakes x {layers_per_cake} layers = {total_layers} layers",
-                      created_by)
-            st.success("Extra baking assignment sent to Baking.")
-            st.rerun()
-
-    assignments = load_table("extra_baking_assignments")
-    table(assignments.sort_values("created_at", ascending=False).head(25) if not assignments.empty else assignments,
-          ["id","plan_date","flavour","cake_size_value","cake_shape","layers_per_cake","cake_units","total_layers","assigned_baker","reason","assignment_status"])
-
-    st.divider()
+    st.markdown("## 🎂 Fresh Cakes for the Day")
     pp_queue = filter_orders(df,["Deposit Confirmed"])
     render_queue_table(pp_queue, "Orders Awaiting Production Assignment")
     row = select_order(pp_queue, "pp_order")
@@ -2064,9 +2136,9 @@ def render_production_planning():
         else:
             a,b,c,d,e = st.columns(5)
             baker = a.selectbox("Baker", bakers)
-            piler = b.selectbox("Piler", pilers)
-            coverer = c.selectbox("Coverer", coverers)
-            decorator = d.selectbox("Decorator", decorators)
+            piler = st.multiselect("Piler(s)", pilers, key="pp_piler_multi")
+            coverer = st.multiselect("Coverer(s)", coverers, key="pp_coverer_multi")
+            decorator = st.multiselect("Decorator(s)", decorators, key="pp_decorator_multi")
             by = e.text_input("Updated by", value="Production Manager")
             topper_owner = "Keith"
             if str(row.get("topper_required")) == "Yes":
@@ -2078,8 +2150,11 @@ def render_production_planning():
                 if target is not None:
                     st.warning(f"Topper target: {target.strftime('%Y-%m-%d %I:%M %p')} — 2 hours before cake due time.")
         if st.button("Assign Full Production Team", use_container_width=True):
+            piler_val = ", ".join(piler) if isinstance(piler, list) else piler
+            coverer_val = ", ".join(coverer) if isinstance(coverer, list) else coverer
+            decorator_val = ", ".join(decorator) if isinstance(decorator, list) else decorator
             update_order(row.order_id, {
-                "baker_assigned":baker, "piler_assigned":piler, "coverer_assigned":coverer, "decorator_assigned":decorator,
+                "baker_assigned":baker, "piler_assigned":piler_val, "coverer_assigned":coverer_val, "decorator_assigned":decorator_val,
                 "workflow_status":"Production Planned", "current_owner":"Baking", "next_action":"Start baking",
                 "production_planned_at":now_iso(), "baking_status":"Not Started", "decoration_status":"Not Started",
             }, by, "Production Team Assigned", "Production Planning")
@@ -2091,8 +2166,45 @@ def render_production_planning():
                     "topper_pickup_note":f"Topper assigned to {topper_owner}"
                 }, by, "Topper Assigned", "Production Planning")
                 create_notification(row.order_id,"Design & Innovation",topper_owner,
-                                    f"New topper assignment. Words: {disp(row.get('topper_wording'))}. Decorator: {decorator}.")
+                                    f"New topper assignment. Words: {disp(row.get('topper_wording'))}. Decorator: {decorator_val}.")
             st.success("Production team assigned."); st.rerun()
+
+    st.divider()
+    st.markdown("## 🧁 Extra Cake Layers for the Day (Abrupt/Buffer Stock)")
+    st.caption("Bake ahead for abrupt/urgent clients — one flavour at a time. Add as many as you need, one after another; each becomes its own row below.")
+    a,b,c,d = st.columns(4)
+    plan_date = a.date_input("Plan Date", value=date.today(), key="pp_extra_date")
+    extra_flavour_choice = b.selectbox("Flavour", STANDARD_FLAVOURS, key="pp_extra_flavour_choice")
+    extra_flavour = st.text_input("Specify flavour", key="pp_extra_flavour_other") if extra_flavour_choice == "Other" else extra_flavour_choice
+    extra_size_choice = c.selectbox("Cake Size (inches)", STANDARD_CAKE_SIZES, key="pp_extra_size_choice")
+    extra_size = st.number_input("Specify size (inches)", min_value=0.0, step=0.5, value=8.0, key="pp_extra_size_other") if extra_size_choice == "Custom" else float(extra_size_choice)
+    extra_shape = d.selectbox("Shape", ["Round","Rectangle","Square","Heart","Custom"], key="pp_extra_shape")
+    a,b,c = st.columns(3)
+    total_layers = a.number_input("Number of Layers to Bake (this flavour)", min_value=1, step=1, value=3, key="pp_extra_total_layers")
+    _bakers_dd,_,_,_,_ = staff_lists()
+    assigned_baker = b.selectbox("Assigned Baker", _bakers_dd, key="pp_extra_baker")
+    reason = c.selectbox("Reason", ["Abrupt client buffer","Expected demand","Corporate orders","Wedding support","Other"], key="pp_extra_reason")
+    created_by = st.text_input("Planned by", value=st.session_state.get("staff_name", "Production Manager"), key="pp_extra_by")
+    if st.button("Assign Extra Baking to Baker", use_container_width=True, key="pp_extra_btn"):
+        if not str(extra_flavour).strip():
+            st.error("Enter the flavour.")
+        else:
+            with connect() as conn:
+                conn.execute("""INSERT INTO extra_baking_assignments(plan_date,flavour,cake_size_value,cake_shape,layers_per_cake,
+                                cake_units,total_layers,assigned_baker,reason,assignment_status,created_by,created_at)
+                                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                             (str(plan_date), str(extra_flavour).strip(), extra_size, extra_shape, int(total_layers),
+                              1, int(total_layers), assigned_baker, reason, "Assigned", created_by, now_iso()))
+                conn.commit()
+            audit_log(None, "Extra Baking Assigned", "Production Planning",
+                      f"{extra_size}\" {extra_shape} {extra_flavour}: {total_layers} layers",
+                      created_by)
+            st.success("Extra baking assignment sent to Baking. Add another below if needed — this form stays ready.")
+            st.rerun()
+
+    assignments = load_table("extra_baking_assignments")
+    table(assignments.sort_values("created_at", ascending=False).head(25) if not assignments.empty else assignments,
+          ["id","plan_date","flavour","cake_size_value","cake_shape","total_layers","assigned_baker","reason","assignment_status"])
 
     st.markdown("### Production Pipeline")
     table(filter_orders(df,["Production Planned","Baking","Baking Correction Required","Piling Incoming","Piling","Piling Correction Required",
@@ -2438,6 +2550,8 @@ def render_piling():
             may_act = can_act_on(row, "piler_assigned")
             if not may_act:
                 st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('piler_assigned'))}**.")
+            _pilers_ma,_,_,_,_ = staff_lists()
+            render_multi_assign(row, "piler_assigned", "Piler", _pilers_ma, f"pile_{row.order_id}")
             render_stage_material_planning("Filling / Piling", row, row.get("piler_assigned"))
             by = st.text_input("Updated by", value=disp(row.get("piler_assigned")), key="pile_by2")
             if st.button("✅ Piling Complete → Send to Covering Check", use_container_width=True, disabled=not may_act):
@@ -2518,22 +2632,25 @@ def render_covering():
             may_act = can_act_on(row, "coverer_assigned")
             if not may_act:
                 st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('coverer_assigned'))}**.")
+            _,_,_coverers_ma,decorator_names,_ = staff_lists()
+            render_multi_assign(row, "coverer_assigned", "Coverer", _coverers_ma, f"cov_{row.order_id}")
             render_stage_material_planning("Coating / Covering", row, row.get("coverer_assigned"))
             by = st.text_input("Updated by", value=disp(row.get("coverer_assigned")), key="cov_by2")
-            _, _, _, decorator_names, _ = staff_lists()
-            assign_to = st.selectbox(
-                "Assign to which decorator?",
+            assign_to_list = st.multiselect(
+                "Assign to which decorator(s)?",
                 decorator_names,
                 key="cov_assign_decorator",
-                help="Picking a name here sends a direct alert to Decoration and makes it clear whose job this is — this is how a job stops sitting unclaimed in a shared queue.")
+                help="Pick more than one for bulk orders that need several decorators. Everyone picked gets a direct alert — this is how a job stops sitting unclaimed in a shared queue.")
             if st.button("✅ Covering Complete → Send to Decorator Check", use_container_width=True, disabled=not may_act):
+                assign_to = ", ".join(assign_to_list) if assign_to_list else ""
                 update_order(row.order_id, {
                     "workflow_status": "Decorating Incoming", "current_owner": "Decoration",
                     "next_action": f"{assign_to} to check covering and accept", "decorator_assigned": assign_to,
                 }, by, "Covering Submitted", "Covering")
-                create_notification(row.order_id, "Decoration", assign_to,
-                                     f"🧁 {row.order_id} ({disp(row.get('customer_name'))}) has finished Covering and is assigned to you — check it in 'Incoming from Covering'.")
-                st.success(f"Sent to Decoration, assigned to {assign_to}.")
+                for dname in assign_to_list:
+                    create_notification(row.order_id, "Decoration", dname,
+                                         f"🧁 {row.order_id} ({disp(row.get('customer_name'))}) has finished Covering and is assigned to you — check it in 'Incoming from Covering'.")
+                st.success(f"Sent to Decoration, assigned to {assign_to or 'nobody yet'}.")
                 st.rerun()
     with t3:
         row = select_order(filter_orders(df,["Covering Correction Required"]), "cov_corr")
@@ -2602,7 +2719,7 @@ def render_design_innovation():
         update_order(row.order_id,{"topper_status":"In Progress"},by,"Topper Started","Design & Innovation"); st.rerun()
     if b.button("✅ Topper Ready",use_container_width=True):
         decorator=disp(row.get("decorator_assigned"))
-        message=f"Topper is ready. Pick topper from {by}."
+        message=f"🎨 Your cake topper is ready for order {row.order_id} ({disp(row.get('customer_name'))}) — pick it up from {by}."
         update_order(row.order_id,{"topper_status":"Ready","topper_ready_at":now_iso(),"topper_pickup_note":message},by,"Topper Ready","Design & Innovation")
         create_notification(row.order_id,"Decoration",decorator,message)
         st.success(f"Topper ready. {decorator} notified."); st.rerun()
@@ -2673,6 +2790,8 @@ def render_decoration():
             may_act = can_act_on(row, "decorator_assigned")
             if not may_act:
                 st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('decorator_assigned'))}**.")
+            _,_,_,_decorators_ma,_ = staff_lists()
+            render_multi_assign(row, "decorator_assigned", "Decorator", _decorators_ma, f"deco_{row.order_id}")
             required_mins = decoration_minimum_minutes(row)
             elapsed = minutes_elapsed_since(row.get("decorating_started_at"))
             can_finish = (elapsed is None or required_mins == 0 or elapsed >= required_mins) and may_act
