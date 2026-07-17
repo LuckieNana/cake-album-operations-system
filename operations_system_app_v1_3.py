@@ -10,6 +10,8 @@ If rejected, it returns to the sender with issue logging, correction, and resubm
 import sqlite3
 import uuid
 import hashlib
+import base64
+import time
 import secrets as secrets_mod
 from pathlib import Path
 from datetime import datetime, date, time as dtime, timedelta
@@ -57,6 +59,11 @@ PRODUCT_SIZE_MODE = {
     "Cupcakes": "dozens",
 }
 DOZEN_OPTIONS = ["Half Dozen (6)", "1 Dozen (12)", "2 Dozens (24)", "3 Dozens (36)", "4 Dozens (48)", "Custom"]
+
+STANDARD_FLAVOURS = ["Vanilla", "Chocolate", "Red Velvet", "Lemon", "Coconut", "Banana", "Strawberry",
+                     "Blueberry", "Butterscotch", "Raspberry", "Caramel", "Marble", "Carrot", "Black Forest",
+                     "Fruit Cake", "Other"]
+STANDARD_CAKE_SIZES = ["6", "8", "9", "10", "12", "14", "16", "18", "20", "Custom"]
 DOZEN_COUNTS = {"Half Dozen (6)": 6, "1 Dozen (12)": 12, "2 Dozens (24)": 24, "3 Dozens (36)": 36, "4 Dozens (48)": 48}
 
 DEPARTMENT_NAMES = [
@@ -334,6 +341,52 @@ def page_header(title: str, subtitle: str = ""):
     st.markdown(f"<div class='ca-header'><h1>{title}</h1><p>{subtitle}</p></div>", unsafe_allow_html=True)
     render_staff_greeting()
     render_department_notifications()
+    render_idea_submission_widget()
+    render_auto_refresh_toggle()
+
+
+def render_auto_refresh_toggle():
+    """Optional auto-check for new/updated orders. Uses Streamlit's own rerun (not a full
+    browser page reload), so your current tab and selections stay put — just the data
+    underneath refreshes. Off by default since it briefly pauses the script while waiting."""
+    call_n = st.session_state.get("_refresh_widget_calls", 0) + 1
+    st.session_state["_refresh_widget_calls"] = call_n
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        auto_on = st.checkbox("🔄 Auto-check (30s)", key=f"auto_refresh_toggle_{call_n}",
+                               help="When on, this page quietly re-checks for new or updated orders every 30 seconds — your place on the page is kept.")
+    with col2:
+        if st.button("Check now", key=f"manual_refresh_btn_{call_n}"):
+            st.rerun()
+    if auto_on:
+        time.sleep(30)
+        st.rerun()
+
+
+def render_idea_submission_widget():
+    """Lets anyone, on any page, contribute a creativity/innovation idea — reviewed centrally
+    in Design & Innovation. Uses a per-run call counter for the widget keys since some pages
+    (like Dispatch/Driver) render more than one page_header in the same script run."""
+    call_n = st.session_state.get("_idea_widget_calls", 0) + 1
+    st.session_state["_idea_widget_calls"] = call_n
+    with st.expander("💡 Suggest an Idea (Creativity & Innovation)"):
+        st.caption("Got an idea for a better process, a design touch, a way to save money or time? Share it here — Design & Innovation reviews every submission.")
+        a, b = st.columns(2)
+        idea_title = a.text_input("Idea title", key=f"idea_title_input_{call_n}")
+        idea_category = b.selectbox("Category", ["Design Idea", "Process Improvement", "Cost Saving", "Customer Experience", "Other"], key=f"idea_category_input_{call_n}")
+        idea_desc = st.text_area("Describe your idea", key=f"idea_desc_input_{call_n}")
+        contributor = st.text_input("Your name", value=st.session_state.get("staff_name", ""), key=f"idea_contributor_input_{call_n}")
+        if st.button("Submit Idea", key=f"idea_submit_btn_{call_n}"):
+            if not idea_title.strip() or not idea_desc.strip():
+                st.error("Give it a title and a short description.")
+            else:
+                with connect() as conn:
+                    conn.execute("""INSERT INTO creativity_contributions(contributor_name, department, idea_title, idea_description, category, status, submitted_at)
+                                    VALUES(?,?,?,?,?,?,?)""",
+                                 (contributor.strip() or "Anonymous", st.session_state.get("department", ""), idea_title.strip(), idea_desc.strip(), idea_category, "Submitted", now_iso()))
+                    conn.commit()
+                st.success("Idea submitted — thank you! Design & Innovation will review it.")
+                st.rerun()
 
 
 def render_staff_greeting():
@@ -633,6 +686,10 @@ def ensure_base_schema():
         conn.execute("""CREATE TABLE IF NOT EXISTS cash_clearances(
             id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, driver_name TEXT, order_ids TEXT,
             expected_cash REAL, actual_cash REAL, variance REAL, cleared_by TEXT, cleared_at TEXT, notes TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS creativity_contributions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, contributor_name TEXT, department TEXT, idea_title TEXT,
+            idea_description TEXT, category TEXT, status TEXT DEFAULT 'Submitted', submitted_at TEXT,
+            reviewed_by TEXT, review_notes TEXT, reviewed_at TEXT)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS oven_logs(
             id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT, flavour TEXT, product_type TEXT,
             start_temp_c REAL, stop_temp_c REAL, oven_start_at TEXT, oven_stop_at TEXT,
@@ -685,6 +742,7 @@ def ensure_release_2_schema():
             "size_category": "TEXT",
             "dozens_quantity": "REAL",
             "sold_from_inventory": "TEXT DEFAULT 'No'",
+            "reference_image_base64": "TEXT",
             "inventory_batch_id": "INTEGER",
         }
         for name, definition in additions.items():
@@ -975,11 +1033,12 @@ def render_stage_material_planning(stage, row, default_by):
     st.markdown("### Materials Planning / Usage")
     st.caption("Record what this cake needs or uses — including colour, size, quantity, or weight — so Procurement can track usage.")
     a,b,c = st.columns(3)
-    item = a.selectbox("Material item", STAGE_MATERIALS.get(stage, ["Other"]), key=f"mat_{stage}_item")
-    is_size_family = item in MATERIAL_SIZE_FAMILIES
-    if item in MATERIAL_VARIANTS:
+    item_choice = a.selectbox("Material item", STAGE_MATERIALS.get(stage, ["Other"]), key=f"mat_{stage}_item")
+    item = st.text_input("Specify material name", key=f"mat_{stage}_item_other") if item_choice == "Other" else item_choice
+    is_size_family = item_choice in MATERIAL_SIZE_FAMILIES
+    if item_choice in MATERIAL_VARIANTS:
         label = "Size" if is_size_family else "Colour / Flavor / Variant"
-        variant = b.selectbox(label, MATERIAL_VARIANTS[item], key=f"mat_{stage}_variant")
+        variant = b.selectbox(label, MATERIAL_VARIANTS[item_choice], key=f"mat_{stage}_variant")
     else:
         colour_choice = b.selectbox("Colour (if applicable)", MATERIAL_COLOURS, key=f"mat_{stage}_colour")
         variant = "" if colour_choice == "N/A" else colour_choice
@@ -993,7 +1052,9 @@ def render_stage_material_planning(stage, row, default_by):
         unit = e.selectbox("Unit", ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml"], key=f"mat_{stage}_unit")
     by = st.text_input("Recorded by", value=str(default_by or stage), key=f"mat_{stage}_by")
     if st.button("Add Material", key=f"mat_{stage}_add", use_container_width=True):
-        if qty <= 0:
+        if not str(item).strip():
+            st.error("Specify the material name.")
+        elif qty <= 0:
             st.error("Enter a quantity/weight greater than zero.")
         else:
             colour_val = variant if (variant and not is_size_family) else ""
@@ -1270,13 +1331,16 @@ def order_card(row, extra=None):
     if extra:
         for label, value in extra:
             html.append(f"<b>{label}:</b> {disp(value)}<br>")
-    if disp(row.get("reference_image_path")) != "—":
-        html.append(f"<br><b>Reference Image:</b> {disp(row.get('reference_image_path'))}")
     html.append("</div>")
     st.markdown("".join(html), unsafe_allow_html=True)
+    img_b64 = row.get("reference_image_base64")
     path = row.get("reference_image_path")
-    if path and isinstance(path, str) and Path(path).exists():
-        st.image(path, caption="Customer reference image", width=320)
+    if img_b64 and isinstance(img_b64, str) and img_b64.startswith("data:image"):
+        st.markdown("**📷 Customer Reference Image**")
+        st.image(img_b64, caption="What the customer wants — refer to this at every stage", width=420)
+    elif path and isinstance(path, str) and Path(path).exists():
+        st.markdown("**📷 Customer Reference Image**")
+        st.image(path, caption="What the customer wants — refer to this at every stage", width=420)
 
 
 def table(df, columns):
@@ -1289,15 +1353,20 @@ def table(df, columns):
 
 def render_queue_table(df_subset, title="Jobs In Queue", extra_columns=None):
     """Show every job currently sitting at this stage, not just the one selected below,
-    so staff can see the full workload instead of assuming there is only one job."""
-    base_cols = ["order_id", "product_type", "customer_name", "order_type", "urgency_level", "priority",
+    so staff can see the full workload instead of assuming there is only one job.
+    Numbered in order of due date/time so everyone can see the order jobs should be tackled in."""
+    base_cols = ["#", "order_id", "product_type", "customer_name", "order_type", "urgency_level", "priority",
                  "due_date", "expected_time", "workflow_status"]
     cols = base_cols + (extra_columns or [])
     st.markdown(f"#### 📋 {title} — {len(df_subset)} job(s) waiting")
     if df_subset is None or df_subset.empty:
         st.caption("Nothing waiting here right now — you're all caught up.")
         return
-    table(df_subset, cols)
+    ordered = df_subset.copy()
+    if "due_date" in ordered.columns:
+        ordered = ordered.sort_values(["due_date", "expected_time"] if "expected_time" in ordered.columns else ["due_date"])
+    ordered.insert(0, "#", range(1, len(ordered) + 1))
+    table(ordered, cols)
 
 
 DEPARTMENT_STAGE_STATUSES = {
@@ -1318,6 +1387,19 @@ DEPARTMENT_STAFF_COLUMN = {
     "Studio / Final QC": None,
     "Packaging": None,
 }
+
+
+def can_act_on(row, staff_column):
+    """Everyone in the department can VIEW any job, but only the person actually assigned
+    to it (or a Head of Department, or anyone if nobody's been assigned yet) can act on it —
+    so buttons stay visible for context but are disabled for people who aren't the owner."""
+    if st.session_state.get("is_hod"):
+        return True
+    assigned = str(row.get(staff_column) or "").strip()
+    if not assigned or assigned == "—":
+        return True
+    me = st.session_state.get("staff_name", "").strip()
+    return assigned == me
 
 
 def render_hod_overview(department_name, df):
@@ -1601,11 +1683,15 @@ def render_customer_care():
 
         order_id = generate_order_id()
         image_path = ""
+        image_base64 = ""
         if img is not None:
             suffix = Path(img.name).suffix.lower()
             target = REFERENCE_IMAGE_DIR / f"{order_id}{suffix}"
-            target.write_bytes(img.getbuffer())
+            img_bytes = img.getbuffer()
+            target.write_bytes(img_bytes)
             image_path = str(target)
+            mime = "image/png" if suffix == ".png" else "image/jpeg"
+            image_base64 = f"data:{mime};base64,{base64.b64encode(bytes(img_bytes)).decode()}"
 
         balance = max(total_price - amount_paid, 0)
         if payment_arrangement == "No Deposit / Pay on Delivery":
@@ -1631,7 +1717,7 @@ def render_customer_care():
             "cake_size_value": size_value, "cake_size_unit": "Inches", "cake_shape": shape,
             "cake_format": cake_format, "icing_type": icing_type,
             "number_of_layers": final_layers, "system_suggested_layers": suggested,
-            "final_approved_layers": final_layers, "reference_image_path": image_path,
+            "final_approved_layers": final_layers, "reference_image_path": image_path, "reference_image_base64": image_base64,
             "order_type": order_type, "inventory_check_required": inventory_check,
             "delivery_window_start": str(delivery_window_start), "delivery_window_end": str(delivery_window_end),
             "topper_required": topper_required, "topper_wording": topper_wording.strip() if topper_required=="Yes" else "",
@@ -1898,34 +1984,37 @@ def render_production_planning():
         table(df[df["workflow_status"].isin(pipeline_statuses)] if "workflow_status" in df.columns else df.iloc[0:0],
               ["order_id","customer_name","urgency_level","baker_assigned","piler_assigned","coverer_assigned","decorator_assigned","workflow_status","next_action"])
 
-    st.markdown("### Extra Baking Assignment")
-    st.caption("Production Planning decides the extra abrupt-client buffer. Bakers execute the assignment.")
+    st.markdown("### Extra Cake Layers for the Day (Abrupt/Buffer Stock)")
+    st.caption("Production Planning decides extra layers to bake ahead for abrupt/urgent clients. Bakers execute the assignment.")
     a,b,c,d = st.columns(4)
     plan_date = a.date_input("Plan Date", value=date.today(), key="pp_extra_date")
-    extra_flavour = b.text_input("Flavour", key="pp_extra_flavour")
-    extra_size = c.number_input("Cake Size", min_value=0.0, step=0.5, value=8.0, key="pp_extra_size")
+    extra_flavour_choice = b.selectbox("Flavour", STANDARD_FLAVOURS, key="pp_extra_flavour_choice")
+    extra_flavour = st.text_input("Specify flavour", key="pp_extra_flavour_other") if extra_flavour_choice == "Other" else extra_flavour_choice
+    extra_size_choice = c.selectbox("Cake Size (inches)", STANDARD_CAKE_SIZES, key="pp_extra_size_choice")
+    extra_size = st.number_input("Specify size (inches)", min_value=0.0, step=0.5, value=8.0, key="pp_extra_size_other") if extra_size_choice == "Custom" else float(extra_size_choice)
     extra_shape = d.selectbox("Shape", ["Round","Rectangle","Square","Heart","Custom"], key="pp_extra_shape")
     a,b,c,d,e = st.columns(5)
     layers_per_cake = a.number_input("Layers per Cake", min_value=1, step=1, value=3, key="pp_extra_layers")
-    cake_units = b.number_input("Cake Units to Bake", min_value=1, step=1, value=1, key="pp_extra_units")
+    cake_units = b.number_input("Number of Cake Units to Bake", min_value=1, step=1, value=1, key="pp_extra_units")
     total_layers = int(layers_per_cake) * int(cake_units)
     c.metric("Total Layers", total_layers)
-    assigned_baker = d.selectbox("Assigned Baker", FALLBACK_BAKERS, key="pp_extra_baker")
+    _bakers_dd,_,_,_,_ = staff_lists()
+    assigned_baker = d.selectbox("Assigned Baker", _bakers_dd, key="pp_extra_baker")
     reason = e.selectbox("Reason", ["Abrupt client buffer","Expected demand","Corporate orders","Wedding support","Other"], key="pp_extra_reason")
-    created_by = st.text_input("Planned by", value="Production Manager", key="pp_extra_by")
+    created_by = st.text_input("Planned by", value=st.session_state.get("staff_name", "Production Manager"), key="pp_extra_by")
     if st.button("Assign Extra Baking to Baker", use_container_width=True, key="pp_extra_btn"):
-        if not extra_flavour.strip():
+        if not str(extra_flavour).strip():
             st.error("Enter the flavour.")
         else:
             with connect() as conn:
                 conn.execute("""INSERT INTO extra_baking_assignments(plan_date,flavour,cake_size_value,cake_shape,layers_per_cake,
                                 cake_units,total_layers,assigned_baker,reason,assignment_status,created_by,created_at)
                                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                             (str(plan_date), extra_flavour.strip(), extra_size, extra_shape, int(layers_per_cake),
+                             (str(plan_date), str(extra_flavour).strip(), extra_size, extra_shape, int(layers_per_cake),
                               int(cake_units), total_layers, assigned_baker, reason, "Assigned", created_by, now_iso()))
                 conn.commit()
             audit_log(None, "Extra Baking Assigned", "Production Planning",
-                      f"{cake_units} {extra_size}'' {extra_shape} {extra_flavour} cakes x {layers_per_cake} layers = {total_layers} layers",
+                      f"{cake_units} {extra_size}\" {extra_shape} {extra_flavour} cakes x {layers_per_cake} layers = {total_layers} layers",
                       created_by)
             st.success("Extra baking assignment sent to Baking.")
             st.rerun()
@@ -2063,9 +2152,20 @@ def render_baking():
         row = select_order(assigned_q, "bake_assigned")
         if row is not None:
             order_card(row, [("Baker", row.get("baker_assigned")), ("Format", row.get("cake_format"))])
+            st.markdown("### Materials Needed for This Bake")
+            st.markdown(
+                "<div style='background:#FBEAEA;border:1px solid #E8B4B4;border-radius:8px;padding:10px 14px;"
+                "color:#8C1D1D;font-weight:700;'>⚠️ Kindly enter the materials you're going to use before you start to bake.</div>",
+                unsafe_allow_html=True)
+            render_stage_material_planning("Baking", row, row.get("baker_assigned"))
+            logged_materials = load_table("stage_material_usage")
+            has_materials = not logged_materials.empty and not logged_materials[
+                (logged_materials["order_id"] == row.order_id) & (logged_materials["stage"] == "Baking")].empty
             by = st.text_input("Updated by", value=disp(row.get("baker_assigned")), key="bake_by1")
             start_temp = st.number_input("Oven Start Temperature (°C)", min_value=0, max_value=300, value=180, step=5, key="bake_start_temp")
-            if st.button("▶️ Start Baking", use_container_width=True):
+            if not has_materials:
+                st.caption("The Start Baking button unlocks once at least one material has been logged above.")
+            if st.button("▶️ Start Baking", use_container_width=True, disabled=not has_materials):
                 started_at = now_iso()
                 update_order(row.order_id, {"workflow_status":"Baking", "current_owner":"Baking", "next_action":"Submit for baking check", "baking_started_at":started_at, "baking_status":"In Progress"}, by, "Baking Started", "Baking")
                 with connect() as conn:
@@ -2074,6 +2174,17 @@ def render_baking():
                                  (row.order_id, row.get("flavours"), row.get("product_type"), start_temp, started_at, by))
                     conn.commit()
                 st.rerun()
+
+        st.divider()
+        st.markdown("### 🧁 Extra Cake Layers for the Day — Assigned to You")
+        st.caption("Pre-baked layers for abrupt/urgent clients, assigned by Production Planning — separate from customer orders above.")
+        extra_here = load_table("extra_baking_assignments")
+        pending_extra_here = extra_here[extra_here["assignment_status"].isin(["Assigned","In Progress"])] if not extra_here.empty else extra_here
+        if pending_extra_here.empty:
+            st.caption("No extra cake layers assigned for today.")
+        else:
+            table(pending_extra_here, ["id","plan_date","flavour","cake_size_value","cake_shape","layers_per_cake","cake_units","total_layers","assigned_baker","reason","assignment_status"])
+            st.caption("Go to the 'Baked Cake Inventory' tab to mark one of these complete once baked.")
     with t2:
         prog_q = filter_orders(df,["Baking"])
         render_queue_table(prog_q, "Cakes Currently Baking", ["baker_assigned"])
@@ -2185,7 +2296,7 @@ def render_baking():
             st.info("No orders due on this plan date.")
 
     with t5:
-        st.markdown("### Extra Baking Assignments from Production Planning")
+        st.markdown("### Extra Cake Layers for the Day — Assigned to You")
         extra = load_table("extra_baking_assignments")
         pending_extra = extra[extra["assignment_status"].isin(["Assigned","In Progress"])] if not extra.empty else extra
         table(pending_extra, ["id","plan_date","flavour","cake_size_value","cake_shape","layers_per_cake","cake_units","total_layers","assigned_baker","reason","assignment_status"])
@@ -2296,7 +2407,10 @@ def render_piling():
         row = select_order(incoming_q, "pile_in")
         if row is not None:
             order_card(row, [("Baker", row.get("baker_assigned")), ("Piler", row.get("piler_assigned"))])
-            by = st.text_input("Checked by", value=disp(row.get("piler_assigned")), key="pile_by1")
+            may_act = can_act_on(row, "piler_assigned")
+            if not may_act:
+                st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('piler_assigned'))}**.")
+            by = st.text_input("Checked by", value=disp(row.get("piler_assigned")) if disp(row.get("piler_assigned")) != "—" else st.session_state.get("staff_name",""), key="pile_by1")
             a,b = st.columns(2)
             if disp(row.get("inventory_reservation_id")) != "—":
                 st.markdown("### Inventory Layer Usage")
@@ -2306,31 +2420,38 @@ def render_piling():
             else:
                 layers_used = None
                 layer_notes = ""
-            if a.button("✅ Accept for Piling", use_container_width=True):
+            if a.button("✅ Accept for Piling", use_container_width=True, disabled=not may_act):
                 if disp(row.get("inventory_reservation_id")) != "—":
                     record_layer_usage(int(row.get("inventory_reservation_id")), row.order_id, "Filling / Piling", int(layers_used), by, layer_notes)
                 insert_stage_check(row.order_id,"Baking","Piling",by,"Passed")
-                update_order(row.order_id, {"workflow_status":"Piling", "current_owner":"Filling / Piling", "next_action":"Pile and submit to Covering"}, by, "Piling Accepted", "Piling")
+                update_order(row.order_id, {"workflow_status":"Piling", "current_owner":"Filling / Piling", "next_action":"Pile and submit to Covering", "piler_assigned": by}, by, "Piling Accepted", "Piling")
                 st.rerun()
             with b:
-                issue_form("pile_in", "Baking", "Piling", "Baking Correction Required", "Baking", row, row.get("baker_assigned"))
+                if may_act:
+                    issue_form("pile_in", "Baking", "Piling", "Baking Correction Required", "Baking", row, row.get("baker_assigned"))
     with t2:
         prog_q = filter_orders(df,["Piling"])
         render_queue_table(prog_q, "Cakes Currently Being Piled", ["piler_assigned"])
         row = select_order(prog_q, "pile_prog")
         if row is not None:
             order_card(row)
+            may_act = can_act_on(row, "piler_assigned")
+            if not may_act:
+                st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('piler_assigned'))}**.")
             render_stage_material_planning("Filling / Piling", row, row.get("piler_assigned"))
             by = st.text_input("Updated by", value=disp(row.get("piler_assigned")), key="pile_by2")
-            if st.button("✅ Piling Complete → Send to Covering Check", use_container_width=True):
+            if st.button("✅ Piling Complete → Send to Covering Check", use_container_width=True, disabled=not may_act):
                 update_order(row.order_id, {"workflow_status":"Covering Incoming", "current_owner":"Coating / Covering", "next_action":"Coverer to check piling and accept"}, by, "Piling Submitted", "Piling")
                 st.rerun()
     with t3:
         row = select_order(filter_orders(df,["Piling Correction Required"]), "pile_corr")
         if row is not None:
             order_card(row, [("Issue", row.get("issue_notes"))])
+            may_act = can_act_on(row, "piler_assigned")
+            if not may_act:
+                st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('piler_assigned'))}**.")
             by = st.text_input("Corrected by", value=disp(row.get("piler_assigned")), key="pile_by3")
-            if st.button("🔁 Correction Complete — Resubmit to Covering", use_container_width=True):
+            if st.button("🔁 Correction Complete — Resubmit to Covering", use_container_width=True, disabled=not may_act):
                 update_order(row.order_id, {"workflow_status":"Covering Incoming", "current_owner":"Coating / Covering", "next_action":"Resubmitted for covering acceptance"}, by, "Piling Correction Complete", "Piling")
                 st.rerun()
 
@@ -2376,20 +2497,27 @@ def render_covering():
         row = select_order(incoming_q, "cov_in")
         if row is not None:
             order_card(row, [("Piler", row.get("piler_assigned")), ("Coverer", row.get("coverer_assigned"))])
-            by = st.text_input("Checked by", value=disp(row.get("coverer_assigned")), key="cov_by1")
+            may_act = can_act_on(row, "coverer_assigned")
+            if not may_act:
+                st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('coverer_assigned'))}**.")
+            by = st.text_input("Checked by", value=disp(row.get("coverer_assigned")) if disp(row.get("coverer_assigned")) != "—" else st.session_state.get("staff_name",""), key="cov_by1")
             a,b = st.columns(2)
-            if a.button("✅ Piling Accepted → Start Covering", use_container_width=True):
+            if a.button("✅ Piling Accepted → Start Covering", use_container_width=True, disabled=not may_act):
                 insert_stage_check(row.order_id,"Piling","Covering",by,"Passed")
-                update_order(row.order_id, {"workflow_status":"Covering", "current_owner":"Coating / Covering", "next_action":"Cover and submit to Decoration"}, by, "Piling Accepted by Coverer", "Covering")
+                update_order(row.order_id, {"workflow_status":"Covering", "current_owner":"Coating / Covering", "next_action":"Cover and submit to Decoration", "coverer_assigned": by}, by, "Piling Accepted by Coverer", "Covering")
                 st.rerun()
             with b:
-                issue_form("cov_in", "Piling", "Covering", "Piling Correction Required", "Filling / Piling", row, row.get("piler_assigned"))
+                if may_act:
+                    issue_form("cov_in", "Piling", "Covering", "Piling Correction Required", "Filling / Piling", row, row.get("piler_assigned"))
     with t2:
         prog_q = filter_orders(df,["Covering"])
         render_queue_table(prog_q, "Cakes Currently Being Covered", ["coverer_assigned"])
         row = select_order(prog_q, "cov_prog")
         if row is not None:
             order_card(row)
+            may_act = can_act_on(row, "coverer_assigned")
+            if not may_act:
+                st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('coverer_assigned'))}**.")
             render_stage_material_planning("Coating / Covering", row, row.get("coverer_assigned"))
             by = st.text_input("Updated by", value=disp(row.get("coverer_assigned")), key="cov_by2")
             _, _, _, decorator_names, _ = staff_lists()
@@ -2398,7 +2526,7 @@ def render_covering():
                 decorator_names,
                 key="cov_assign_decorator",
                 help="Picking a name here sends a direct alert to Decoration and makes it clear whose job this is — this is how a job stops sitting unclaimed in a shared queue.")
-            if st.button("✅ Covering Complete → Send to Decorator Check", use_container_width=True):
+            if st.button("✅ Covering Complete → Send to Decorator Check", use_container_width=True, disabled=not may_act):
                 update_order(row.order_id, {
                     "workflow_status": "Decorating Incoming", "current_owner": "Decoration",
                     "next_action": f"{assign_to} to check covering and accept", "decorator_assigned": assign_to,
@@ -2411,14 +2539,42 @@ def render_covering():
         row = select_order(filter_orders(df,["Covering Correction Required"]), "cov_corr")
         if row is not None:
             order_card(row, [("Issue", row.get("issue_notes"))])
+            may_act = can_act_on(row, "coverer_assigned")
+            if not may_act:
+                st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('coverer_assigned'))}**.")
             by = st.text_input("Corrected by", value=disp(row.get("coverer_assigned")), key="cov_by3")
-            if st.button("🔁 Correction Complete — Resubmit to Decoration", use_container_width=True):
+            if st.button("🔁 Correction Complete — Resubmit to Decoration", use_container_width=True, disabled=not may_act):
                 update_order(row.order_id, {"workflow_status":"Decorating Incoming", "current_owner":"Decoration", "next_action":"Resubmitted for decorator acceptance"}, by, "Covering Correction Complete", "Covering")
                 st.rerun()
 
 
 def render_design_innovation():
     page_header("🎨 Design & Innovation", "Keith's topper queue, automatically prioritized by topper target time.")
+    st.markdown("## 💡 Creativity & Innovation Contributions")
+    st.caption("Ideas submitted by anyone across the company — review, discuss, and mark progress here.")
+    ideas = load_table("creativity_contributions")
+    if ideas.empty:
+        st.caption("No ideas submitted yet.")
+    else:
+        table(ideas.sort_values("submitted_at", ascending=False),
+              ["id", "contributor_name", "department", "idea_title", "category", "status", "submitted_at"])
+        pick_id = st.selectbox("Select an idea to review", ideas["id"].tolist(), key="idea_review_pick")
+        idea_row = ideas[ideas["id"] == pick_id].iloc[0]
+        st.markdown(f"**{idea_row['idea_title']}** — by {idea_row['contributor_name']} ({disp(idea_row.get('department'))})")
+        st.write(idea_row["idea_description"])
+        new_status = st.selectbox("Status", ["Submitted", "Under Review", "Approved", "Implemented", "Not Feasible"],
+                                   index=["Submitted", "Under Review", "Approved", "Implemented", "Not Feasible"].index(idea_row["status"]) if idea_row["status"] in ["Submitted", "Under Review", "Approved", "Implemented", "Not Feasible"] else 0,
+                                   key="idea_status_pick")
+        review_notes = st.text_area("Review notes", value=disp(idea_row.get("review_notes")) if disp(idea_row.get("review_notes")) != "—" else "", key="idea_review_notes")
+        reviewer = st.text_input("Reviewed by", value=st.session_state.get("staff_name", "Keith"), key="idea_reviewer")
+        if st.button("Save Review", key="idea_save_review"):
+            with connect() as conn:
+                conn.execute("UPDATE creativity_contributions SET status=?, review_notes=?, reviewed_by=?, reviewed_at=? WHERE id=?",
+                             (new_status, review_notes, reviewer, now_iso(), int(pick_id)))
+                conn.commit()
+            st.success("Review saved."); st.rerun()
+    st.divider()
+
     df=load_orders()
     q=df[col(df,"topper_required")=="Yes"].copy()
     if q.empty:
@@ -2477,14 +2633,18 @@ def render_decoration():
         row = select_order(incoming_q, "deco_in")
         if row is not None:
             order_card(row, [("Coverer", row.get("coverer_assigned")), ("Decorator", row.get("decorator_assigned"))])
-            by = st.text_input("Checked by", value=disp(row.get("decorator_assigned")), key="deco_by1")
+            may_act = can_act_on(row, "decorator_assigned")
+            if not may_act:
+                st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('decorator_assigned'))}**.")
+            by = st.text_input("Checked by", value=disp(row.get("decorator_assigned")) if disp(row.get("decorator_assigned")) != "—" else st.session_state.get("staff_name",""), key="deco_by1")
             a,b = st.columns(2)
-            if a.button("✅ Covering Accepted → Start Decorating", use_container_width=True):
+            if a.button("✅ Covering Accepted → Start Decorating", use_container_width=True, disabled=not may_act):
                 insert_stage_check(row.order_id,"Covering","Decoration",by,"Passed")
                 update_order(row.order_id, {"workflow_status":"Decorating", "current_owner":"Decoration", "next_action":"Decorate and submit to Studio", "decorating_started_at":now_iso(), "decoration_status":"In Progress"}, by, "Covering Accepted by Decorator", "Decoration")
                 st.rerun()
             with b:
-                issue_form("deco_in", "Covering", "Decoration", "Covering Correction Required", "Coating / Covering", row, row.get("coverer_assigned"))
+                if may_act:
+                    issue_form("deco_in", "Covering", "Decoration", "Covering Correction Required", "Coating / Covering", row, row.get("coverer_assigned"))
     with t2:
         row = select_order(df[df["decorator_assigned"].notna()] if "decorator_assigned" in df.columns else df.iloc[0:0], "mat_order")
         if row is not None:
@@ -2493,7 +2653,7 @@ def render_decoration():
             a,b,c,d = st.columns(4)
             item = a.text_input("Item")
             qty = b.number_input("Quantity", min_value=0.0, step=1.0)
-            unit = c.text_input("Unit", value="pcs")
+            unit = c.selectbox("Unit", ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml"])
             by = d.text_input("Requested by", value=disp(row.get("decorator_assigned")))
             if st.button("Submit Material Requirement", use_container_width=True):
                 if item and qty > 0:
@@ -2510,9 +2670,12 @@ def render_decoration():
         row = select_order(prog_q, "deco_prog")
         if row is not None:
             order_card(row, [("Icing Type", row.get("icing_type"))])
+            may_act = can_act_on(row, "decorator_assigned")
+            if not may_act:
+                st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('decorator_assigned'))}**.")
             required_mins = decoration_minimum_minutes(row)
             elapsed = minutes_elapsed_since(row.get("decorating_started_at"))
-            can_finish = elapsed is None or required_mins == 0 or elapsed >= required_mins
+            can_finish = (elapsed is None or required_mins == 0 or elapsed >= required_mins) and may_act
             if required_mins == 0:
                 st.info(f"Icing type **{disp(row.get('icing_type'))}** — no minimum decoration time enforced.")
             elif elapsed is not None:
@@ -2529,7 +2692,7 @@ def render_decoration():
                     st.success(f"TOPPER READY — {disp(row.get('topper_pickup_note'))}")
                     st.write(f"**Topper wording:** {disp(row.get('topper_wording'))}")
                     receiver=st.text_input("Decorator receiving topper",value=disp(row.get("decorator_assigned")),key="topper_receiver")
-                    if st.button("Confirm Topper Picked from Keith",use_container_width=True,key="topper_received_btn"):
+                    if st.button("Confirm Topper Picked from Keith",use_container_width=True,key="topper_received_btn", disabled=not may_act):
                         update_order(row.order_id,{"topper_status":"Received by Decorator","topper_received_by_decorator":receiver,"topper_received_at":now_iso(),"topper_pickup_note":"Topper received by assigned decorator"},receiver,"Topper Received","Decoration")
                         st.rerun()
                 elif str(row.get("topper_status")) == "Received by Decorator":
@@ -2545,8 +2708,11 @@ def render_decoration():
         row = select_order(filter_orders(df,["Decoration Correction Required"]), "deco_corr")
         if row is not None:
             order_card(row, [("Issue", row.get("issue_notes"))])
+            may_act = can_act_on(row, "decorator_assigned")
+            if not may_act:
+                st.info(f"👀 Viewing only — this job is assigned to **{disp(row.get('decorator_assigned'))}**.")
             by = st.text_input("Corrected by", value=disp(row.get("decorator_assigned")), key="deco_by4")
-            if st.button("🔁 Correction Complete — Resubmit to Studio", use_container_width=True):
+            if st.button("🔁 Correction Complete — Resubmit to Studio", use_container_width=True, disabled=not may_act):
                 update_order(row.order_id, {"workflow_status":"Studio Check", "current_owner":"Studio / Final QC", "next_action":"Resubmitted for Studio check"}, by, "Decoration Correction Complete", "Decoration")
                 st.rerun()
 
@@ -3248,7 +3414,7 @@ def render_admin():
     table(inv.sort_values("date_baked", ascending=False).head(50) if not inv.empty else inv,
           ["id","date_baked","flavour","cake_size_value","cake_shape","layers_available","quantity_available","baker","storage_location","inventory_status","reserved_order_id"])
 
-    st.markdown("### Extra Baking Assignments")
+    st.markdown("### Extra Cake Layers for the Day")
     extra = load_table("extra_baking_assignments")
     table(extra.sort_values("created_at", ascending=False).head(50) if not extra.empty else extra,
           ["id","plan_date","flavour","cake_size_value","cake_shape","layers_per_cake","cake_units","total_layers","assigned_baker","reason","assignment_status"])
@@ -3378,6 +3544,8 @@ def main():
     ensure_bootstrap_admin()
     ensure_default_staff_roster()
     apply_staff_name_corrections()
+    st.session_state["_idea_widget_calls"] = 0
+    st.session_state["_refresh_widget_calls"] = 0
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
         st.session_state.department = None
