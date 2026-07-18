@@ -104,22 +104,22 @@ p, span, div, label, .stMarkdown, [data-testid='stWidgetLabel'] p{color:var(--in
 .stCaption, [data-testid='stCaptionContainer']{color:var(--muted-soft)!important;}
 
 /* Sidebar: solid, confident, quiet */
-[data-testid='stSidebar']{background:var(--plum-deep); border-right:1px solid rgba(0,0,0,.15);}
-[data-testid='stSidebar'] *{color:#F2EEF5!important;}
-[data-testid='stSidebar'] [data-testid='stCaptionContainer']{color:#B7A9C4!important;}
+[data-testid='stSidebar']{background:var(--plum-mid); border-right:1px solid rgba(0,0,0,.15);}
+[data-testid='stSidebar'] *{color:#FFFFFF!important;}
+[data-testid='stSidebar'] [data-testid='stCaptionContainer']{color:#EFE6F3!important;}
 [data-testid='stSidebar'] input,[data-testid='stSidebar'] div[data-baseweb='select']>div{background:#FFFFFF!important;color:var(--ink)!important; border-radius:8px!important;}
 [data-testid='stSidebar'] hr{border-color:rgba(255,255,255,.14)!important;}
-[data-testid='stSidebar'] .stButton>button{background:rgba(255,255,255,.08)!important;box-shadow:none!important;border:1px solid rgba(255,255,255,.22)!important;font-weight:600!important;}
-[data-testid='stSidebar'] .stButton>button:hover{background:rgba(255,255,255,.16)!important;}
+[data-testid='stSidebar'] .stButton>button{background:rgba(255,255,255,.14)!important;box-shadow:none!important;border:1px solid rgba(255,255,255,.3)!important;font-weight:600!important;}
+[data-testid='stSidebar'] .stButton>button:hover{background:rgba(255,255,255,.24)!important;}
 
-/* Page header: solid deep plum band, thin gold scalloped edge as the one signature flourish */
+/* Page header: lighter purple band (was near-black — hard to read), thin gold scalloped edge as the one signature flourish */
 .ca-header{position:relative; padding:26px 30px 22px; margin-bottom:24px; border-radius:14px;
-  background:var(--plum-deep); box-shadow:0 1px 2px rgba(26,20,32,.06), 0 8px 24px rgba(26,20,32,.16);
-  background-image:radial-gradient(circle at 6px 100%, transparent 6px, var(--plum-deep) 7px);
+  background:var(--plum-mid); box-shadow:0 1px 2px rgba(26,20,32,.06), 0 8px 24px rgba(26,20,32,.16);
+  background-image:radial-gradient(circle at 6px 100%, transparent 6px, var(--plum-mid) 7px);
   background-size:14px 8px; background-repeat:repeat-x; background-position:bottom;
   border-bottom:3px solid var(--gold);}
-.ca-header h1{margin:0; font-size:1.7rem; color:#FBF8FC!important; font-weight:600;}
-.ca-header p{margin:6px 0 0; color:#C9B8D6!important; font-size:.95rem; font-weight:400; font-style:normal;}
+.ca-header h1{margin:0; font-size:1.7rem; color:#FFFFFF!important; font-weight:600;}
+.ca-header p{margin:6px 0 0; color:#F3EAF7!important; font-size:.95rem; font-weight:400; font-style:normal;}
 
 /* Staff greeting: a quiet single line, not a shouting banner */
 .ca-greeting{display:flex; align-items:center; gap:10px; padding:10px 16px; margin:0 0 18px;
@@ -501,7 +501,7 @@ DEFAULT_STAFF_ROSTER = [
     ("aisha", "Aisha", ["Filling / Piling", "Coating / Covering", "Decoration"], False),
     # Baking
     ("billy", "Billy", ["Baking"], True),        # Assistant HOD — given HOD visibility as backup to Uncle Joe
-    ("unclejoe", "Uncle Joe Zziwa", ["Baking"], True),  # HOD
+    ("unclejoe", "Uncle Joe", ["Baking"], True),  # HOD - keep as "Uncle Joe", do not split into first/last
     ("ronnie", "Ronnie", ["Baking"], False),
     ("martin", "Martin", ["Baking"], False),
     ("andre", "Andre", ["Baking"], False),
@@ -534,11 +534,11 @@ STAFF_NAME_CORRECTIONS = {
     "lawrence": "Lawrence Nsubuga",
     "angel": "Angel Nakilembe",
     "desmond": "Desmond Okurut",
-    "unclejoe": "Uncle Joe Zziwa",
     "brenda": "Brenda Nakilyowa",
     "keith": "Keith Abaho",
     "silas": "Silas Turyasingula",
     "suzanmumbejja": "Suzan Nasuuna",
+    "unclejoe": "Uncle Joe",  # explicitly requested to stay as "Uncle Joe", not split into first/last
 }
 
 
@@ -748,6 +748,9 @@ def ensure_release_2_schema():
             "sold_from_inventory": "TEXT DEFAULT 'No'",
             "reference_image_base64": "TEXT",
             "cake_category": "TEXT",
+            "cake_height_inches": "REAL",
+            "mixer_assigned": "TEXT",
+            "oven_person_assigned": "TEXT",
             "is_multi_tier": "TEXT DEFAULT 'No'",
             "tier_count": "INTEGER DEFAULT 1",
             "tier_details_json": "TEXT",
@@ -1062,7 +1065,7 @@ def render_stage_material_planning(stage, row, default_by):
     else:
         d,e = st.columns(2)
         qty = d.number_input("Quantity / Weight", min_value=0.0, step=0.5, key=f"{key_prefix}_qty")
-        unit = e.selectbox("Unit", ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml"], key=f"{key_prefix}_unit")
+        unit = e.selectbox("Unit", ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml", "teaspoon", "tablespoon"], key=f"{key_prefix}_unit")
     by = st.text_input("Recorded by", value=str(default_by or stage), key=f"{key_prefix}_by")
     if st.button("Add Material", key=f"{key_prefix}_add", use_container_width=True):
         if not str(item).strip():
@@ -1341,7 +1344,9 @@ def order_card(row, extra=None):
     if size_mode == "inches" and (disp(row.get("cake_size_value")) != "—" or disp(row.get("cake_shape")) != "—"):
         val = disp(row.get("cake_size_value"))
         shape = disp(row.get("cake_shape"))
-        size = f"<b>Size:</b> {val}'' {shape}<br>" if ptype == "Cake" else f"<b>Size:</b> {val}''<br>"
+        height_val = disp(row.get("cake_height_inches"))
+        height_txt = f" × {height_val}'' high" if height_val not in ("—", "0", "0.0") else ""
+        size = f"<b>Size:</b> {val}'' {shape}{height_txt}<br>" if ptype == "Cake" else f"<b>Size:</b> {val}''{height_txt}<br>"
     elif size_mode in ("category_small_med_big", "category_small_med_large") and disp(row.get("size_category")) != "—":
         size = f"<b>Size:</b> {disp(row.get('size_category'))}<br>"
     elif size_mode == "dozens" and disp(row.get("dozens_quantity")) != "—":
@@ -1659,6 +1664,7 @@ def render_customer_care():
 
     size_mode = PRODUCT_SIZE_MODE.get(product_type, "inches")
     size_value, shape, cake_format, icing_type = 0.0, "N/A", "Full Cake", "N/A"
+    cake_height = 0.0
     size_category = "N/A"
 
     st.markdown("### Product Details")
@@ -1675,10 +1681,11 @@ def render_customer_care():
             selected_flavours.append(_choice.strip())
     flavours = ", ".join(selected_flavours)
     if size_mode == "inches":
-        a, b = st.columns(2)
-        size_value = a.number_input("Size (inches)", min_value=0.0, step=0.5, value=8.0, key="nc_size_inches")
+        a, b, c = st.columns(3)
+        size_value = a.number_input("Pan/Circle Size (inches)", min_value=0.0, step=0.5, value=8.0, key="nc_size_inches")
+        cake_height = b.number_input("Height (inches)", min_value=0.0, step=0.5, value=6.0, key="nc_cake_height")
         if product_type == "Cake":
-            shape = b.selectbox("Cake Shape", ["Round", "Rectangle", "Square", "Heart", "Custom"], key="nc_shape")
+            shape = c.selectbox("Cake Shape", ["Round", "Rectangle", "Square", "Heart", "Custom"], key="nc_shape")
             icing_type = st.selectbox(
                 "Icing / Finish Type *", ["Buttercream", "Whipped Cream", "Fondant", "Other"], key="nc_icing",
                 help="Fondant cakes need at least 1 hour of decoration time. Buttercream/Whipped Cream can move faster.")
@@ -1915,7 +1922,7 @@ def render_customer_care():
             "balance_to_collect": balance, "balance_collection_status": "Pending" if balance > 0 else "Not Required",
             "finance_confirmation_status": "Pending" if balance > 0 else "Not Required",
             "delivery_status": "Not Started", "follow_up_status": "Pending", "issue_flag": "No",
-            "cake_size_value": size_value, "cake_size_unit": "Inches", "cake_shape": shape,
+            "cake_size_value": size_value, "cake_size_unit": "Inches", "cake_shape": shape, "cake_height_inches": cake_height,
             "cake_format": cake_format, "icing_type": icing_type,
             "number_of_layers": final_layers, "system_suggested_layers": suggested,
             "final_approved_layers": final_layers, "reference_image_path": image_path, "reference_image_base64": image_base64,
@@ -2219,16 +2226,21 @@ def render_production_planning():
         ptype = row.get("product_type") or "Cake"
         is_short_pipeline = ptype in SHORT_PIPELINE_PRODUCTS
         st.markdown("### Fresh Production Assignment")
+        st.caption("Baking team breakdown: who's in charge, who's mixing, and who's on the oven for this job.")
         if is_short_pipeline:
-            st.info(f"{PRODUCT_BADGE.get(ptype, ('',''))[0]} order — goes straight from Baking to Packaging, so only a baker is needed here.")
-            a, b = st.columns(2)
-            baker = a.selectbox("Baker", bakers, format_func=first_name)
+            a, b, c = st.columns(3)
+            baker = a.selectbox("Baker (In Charge)", bakers, format_func=first_name)
+            mixer = st.multiselect("Mixer(s)", bakers, format_func=first_name, key="pp_mixer_multi")
+            oven_person = st.multiselect("Oven Person(s)", bakers, format_func=first_name, key="pp_oven_multi")
+            st.info(f"{PRODUCT_BADGE.get(ptype, ('',''))[0]} order — goes straight from Baking to Packaging, so only baking roles are needed here.")
             piler, coverer, decorator = "N/A", "N/A", "N/A"
-            by = b.text_input("Updated by", value="Production Manager")
+            by = c.text_input("Updated by", value="Production Manager")
             topper_owner = "N/A"
         else:
             a,b,c,d,e = st.columns(5)
-            baker = a.selectbox("Baker", bakers, format_func=first_name)
+            baker = a.selectbox("Baker (In Charge)", bakers, format_func=first_name)
+            mixer = st.multiselect("Mixer(s)", bakers, format_func=first_name, key="pp_mixer_multi")
+            oven_person = st.multiselect("Oven Person(s)", bakers, format_func=first_name, key="pp_oven_multi")
             piler = st.multiselect("Piler(s)", pilers, format_func=first_name, key="pp_piler_multi")
             coverer = st.multiselect("Coverer(s)", coverers, format_func=first_name, key="pp_coverer_multi")
             decorator = st.multiselect("Decorator(s)", decorators, format_func=first_name, key="pp_decorator_multi")
@@ -2246,8 +2258,11 @@ def render_production_planning():
             piler_val = ", ".join(piler) if isinstance(piler, list) else piler
             coverer_val = ", ".join(coverer) if isinstance(coverer, list) else coverer
             decorator_val = ", ".join(decorator) if isinstance(decorator, list) else decorator
+            mixer_val = ", ".join(mixer) if isinstance(mixer, list) else mixer
+            oven_val = ", ".join(oven_person) if isinstance(oven_person, list) else oven_person
             update_order(row.order_id, {
-                "baker_assigned":baker, "piler_assigned":piler_val, "coverer_assigned":coverer_val, "decorator_assigned":decorator_val,
+                "baker_assigned":baker, "mixer_assigned":mixer_val, "oven_person_assigned":oven_val,
+                "piler_assigned":piler_val, "coverer_assigned":coverer_val, "decorator_assigned":decorator_val,
                 "workflow_status":"Production Planned", "current_owner":"Baking", "next_action":"Start baking",
                 "production_planned_at":now_iso(), "baking_status":"Not Started", "decoration_status":"Not Started",
             }, by, "Production Team Assigned", "Production Planning")
@@ -2353,10 +2368,10 @@ def render_baking():
     t1,t2,t3,t4,t5,t6,t7 = st.tabs(["Assigned", "In Progress", "Correction Required", "Daily Baking Plan", "Baked Cake Inventory", "🍪 Baked Cookie Inventory", "🌡️ Oven Log"])
     with t1:
         assigned_q = filter_orders(df,["Production Planned"])
-        render_queue_table(assigned_q, "Cakes Assigned To Baking", ["baker_assigned"])
+        render_queue_table(assigned_q, "Cakes Assigned To Baking", ["baker_assigned", "mixer_assigned", "oven_person_assigned"])
         row = select_order(assigned_q, "bake_assigned")
         if row is not None:
-            order_card(row, [("Baker", row.get("baker_assigned")), ("Format", row.get("cake_format"))])
+            order_card(row, [("Baker (In Charge)", row.get("baker_assigned")), ("Mixer", row.get("mixer_assigned")), ("Oven", row.get("oven_person_assigned")), ("Format", row.get("cake_format"))])
             st.markdown("### Materials Needed for This Bake")
             st.markdown(
                 "<div style='background:#FBEAEA;border:1px solid #E8B4B4;border-radius:8px;padding:10px 14px;"
@@ -2876,7 +2891,7 @@ def render_decoration():
             a,b,c,d = st.columns(4)
             item = a.text_input("Item")
             qty = b.number_input("Quantity", min_value=0.0, step=1.0)
-            unit = c.selectbox("Unit", ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml"])
+            unit = c.selectbox("Unit", ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml", "teaspoon", "tablespoon"])
             by = d.text_input("Requested by", value=disp(row.get("decorator_assigned")))
             if st.button("Submit Material Requirement", use_container_width=True):
                 if item and qty > 0:
@@ -2946,10 +2961,11 @@ def render_decoration():
 
 
 def render_studio_qc():
-    page_header("🔍 Studio / Final QC & Packaging", "One dashboard for final quality control, packaging, labels and dispatch release.")
+    page_header("🔍 Studio / Final QC, Packaging & Dispatch", "One continuous platform: final quality control, packaging, delivery notes, dispatch planning, and driver delivery.")
     df = load_orders()
     render_hod_overview("Studio / Final QC", df)
-    qc_tab, packaging_tab = st.tabs(["Final QC", "Packaging & Delivery Notes"])
+    qc_tab, packaging_tab, dispatch_tab, driver_tab = st.tabs(
+        ["Final QC", "Packaging & Delivery Notes", "Dispatch Planning", "Driver Delivery"])
     with qc_tab:
         check_q = filter_orders(df,["Studio Check"])
         render_queue_table(check_q, "Cakes Awaiting Final QC", ["decorator_assigned"])
@@ -2965,7 +2981,11 @@ def render_studio_qc():
             with b:
                 issue_form("studio", "Decoration", "Studio / Final QC", "Decoration Correction Required", "Decoration", row, row.get("decorator_assigned"))
     with packaging_tab:
-        render_packaging()
+        render_packaging(show_header=False)
+    with dispatch_tab:
+        render_dispatch(show_header=False)
+    with driver_tab:
+        render_driver(show_header=False)
 
 
 def render_procurement():
@@ -3050,8 +3070,9 @@ def delivery_note_html(row, fmt="full"):
     """
 
 
-def render_packaging():
-    page_header("📦 Packaging", "Pack cake, print simple delivery note, and send to Dispatch.")
+def render_packaging(show_header=True):
+    if show_header:
+        page_header("📦 Packaging", "Pack cake, print simple delivery note, and send to Dispatch.")
     df = load_orders()
     render_hod_overview("Packaging", df)
     t1,t2,t3 = st.tabs(["Ready for Packaging", "Packaging", "Delivery Note"])
@@ -3100,8 +3121,9 @@ def render_packaging():
             st.markdown(delivery_note_html(row, fmt2), unsafe_allow_html=True)
 
 
-def render_dispatch():
-    page_header("🚚 Dispatch", "Create delivery runs with multiple cakes and stop sequence.")
+def render_dispatch(show_header=True):
+    if show_header:
+        page_header("🚚 Dispatch", "Create delivery runs with multiple cakes and stop sequence.")
     df = load_orders()
     _,_,_,_,drivers = staff_lists()
     ready = filter_orders(df,["Ready for Dispatch"])
@@ -3134,8 +3156,9 @@ def render_dispatch():
     table(runs, ["run_id","driver_name","run_status","run_started_at","run_completed_at","created_at","created_by"])
 
 
-def render_driver():
-    page_header("🚗 Driver", "Simple delivery flow: Start Run → Arrived → Payment/Delivered → Next Stop.")
+def render_driver(show_header=True):
+    if show_header:
+        page_header("🚗 Driver", "Simple delivery flow: Start Run → Arrived → Payment/Delivered → Next Stop.")
     runs = load_table("delivery_runs")
     if runs.empty:
         st.info("No delivery runs yet.")
@@ -3565,6 +3588,28 @@ def render_order_lookup_and_fix(df):
                 "coverer_assigned": new_coverer, "decorator_assigned": new_decorator,
             }, fix_by, "Manual Admin Correction", "Admin")
             st.success(f"Order {row['order_id']} corrected."); st.rerun()
+
+    with st.expander("📝 Correct order entry details (typos, wrong price/phone/flavour, etc.)"):
+        st.caption("For mistakes made when the order was first typed up — this edits the order in place, so it never needs to move through the workflow again.")
+        a, b = st.columns(2)
+        e_name = a.text_input("Customer name", value=disp(row.get("customer_name")) if disp(row.get("customer_name")) != "—" else "", key="admin_fix_name")
+        e_phone = b.text_input("Customer phone", value=disp(row.get("customer_number")) if disp(row.get("customer_number")) != "—" else "", key="admin_fix_phone")
+        a, b = st.columns(2)
+        e_flavours = a.text_input("Flavours", value=disp(row.get("flavours")) if disp(row.get("flavours")) != "—" else "", key="admin_fix_flavours")
+        e_price = b.number_input("Price (UGX)", min_value=0.0, step=5000.0, value=float(row.get("price_ugx") or 0), key="admin_fix_price")
+        a, b = st.columns(2)
+        e_location = a.text_input("Delivery / pickup location", value=disp(row.get("location")) if disp(row.get("location")) != "—" else "", key="admin_fix_location")
+        e_due_date = b.text_input("Due date (YYYY-MM-DD)", value=disp(row.get("due_date")) if disp(row.get("due_date")) != "—" else "", key="admin_fix_due_date")
+        e_design = st.text_area("Design description", value=disp(row.get("design_description")) if disp(row.get("design_description")) != "—" else "", key="admin_fix_design")
+        fix_by2 = st.text_input("Corrected by", value=st.session_state.get("staff_name", "Admin"), key="admin_fix_by2")
+        if st.button("Save Entry Correction", key="admin_fix_entry_save", use_container_width=True):
+            update_order(row["order_id"], {
+                "customer_name": e_name.strip(), "customer_number": e_phone.strip(),
+                "flavours": e_flavours.strip(), "price_ugx": e_price,
+                "location": e_location.strip(), "due_date": e_due_date.strip(),
+                "design_description": e_design.strip(),
+            }, fix_by2, "Manual Entry Correction (typo/price/phone/etc.)", "Admin")
+            st.success(f"Order {row['order_id']} entry details corrected — no need for it to move through the workflow again."); st.rerun()
     st.divider()
 
 
@@ -3678,7 +3723,7 @@ PAGES = {
     "Design & Innovation": render_design_innovation,
     "Decoration": render_decoration,
     "Studio / Final QC": render_studio_qc,
-    "Dispatch / Driver": render_dispatch_driver,
+    "Dispatch / Driver": render_studio_qc,
     "Procurement": render_procurement,
 }
 
