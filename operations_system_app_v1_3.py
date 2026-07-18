@@ -24,6 +24,7 @@ APP_DIR = Path(__file__).parent
 DATABASE_FILE = APP_DIR / "cake_album_operations_v1_1_TEST.db"
 REFERENCE_IMAGE_DIR = APP_DIR / "cake_reference_images"
 REFERENCE_IMAGE_DIR.mkdir(exist_ok=True)
+MAX_VIDEO_SIZE_BYTES = 20 * 1024 * 1024  # 20MB per clip — keeps the database and backups from ballooning
 
 APP_VERSION = "v1.3 — Release 4.1 (Targeted Updates)"
 APP_TAGLINE = "Baking your ideas to life"
@@ -694,6 +695,9 @@ def ensure_base_schema():
             id INTEGER PRIMARY KEY AUTOINCREMENT, contributor_name TEXT, department TEXT, idea_title TEXT,
             idea_description TEXT, category TEXT, status TEXT DEFAULT 'Submitted', submitted_at TEXT,
             reviewed_by TEXT, review_notes TEXT, reviewed_at TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS order_videos(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, filename TEXT, mime_type TEXT,
+            data_base64 TEXT NOT NULL, file_size_bytes INTEGER, uploaded_at TEXT)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS oven_logs(
             id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT, flavour TEXT, product_type TEXT,
             start_temp_c REAL, stop_temp_c REAL, oven_start_at TEXT, oven_stop_at TEXT,
@@ -757,6 +761,7 @@ def ensure_release_2_schema():
             "side_cake_count": "INTEGER DEFAULT 0",
             "side_cake_details_json": "TEXT",
             "reference_images_json": "TEXT",
+            "reference_videos_json": "TEXT",
             "inventory_batch_id": "INTEGER",
         }
         for name, definition in additions.items():
@@ -876,6 +881,14 @@ def ensure_release_2_schema():
             safe_add_column(conn, "stage_material_usage", "colour", "TEXT")
         if "size" not in existing_smu:
             safe_add_column(conn, "stage_material_usage", "size", "TEXT")
+        if "base_quantity" not in existing_smu:
+            safe_add_column(conn, "stage_material_usage", "base_quantity", "REAL")
+        if "multiplier" not in existing_smu:
+            safe_add_column(conn, "stage_material_usage", "multiplier", "REAL DEFAULT 1")
+        if "edited_by" not in existing_smu:
+            safe_add_column(conn, "stage_material_usage", "edited_by", "TEXT")
+        if "edited_at" not in existing_smu:
+            safe_add_column(conn, "stage_material_usage", "edited_at", "TEXT")
         conn.commit()
 
 
@@ -1062,35 +1075,72 @@ def render_stage_material_planning(stage, row, default_by):
     if is_size_family:
         qty = st.number_input("Quantity (pieces)", min_value=0.0, step=1.0, key=f"{key_prefix}_qty")
         unit = "pieces"
+        multiplier = 1.0
+        total_qty = qty
     else:
-        d,e = st.columns(2)
-        qty = d.number_input("Quantity / Weight", min_value=0.0, step=0.5, key=f"{key_prefix}_qty")
+        d,e,f = st.columns(3)
+        qty = d.number_input("Quantity / Weight per unit", min_value=0.0, step=0.5, key=f"{key_prefix}_qty",
+                              help="E.g. 175 if a recipe uses 175g of this per cake.")
         unit = e.selectbox("Unit", ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml", "teaspoon", "tablespoon"], key=f"{key_prefix}_unit")
+        multiplier = f.number_input("Multiplier (batches, e.g. x3)", min_value=0.0, step=0.5, value=1.0, key=f"{key_prefix}_multiplier",
+                                     help="For scaling a recipe up — e.g. enter 3 to multiply 175g by 3, or 1.5 for one and a half times.")
+        total_qty = qty * multiplier
+        if multiplier != 1:
+            st.caption(f"= {qty:g} {unit} × {multiplier:g} = **{total_qty:g} {unit} total**")
     by = st.text_input("Recorded by", value=str(default_by or stage), key=f"{key_prefix}_by")
     if st.button("Add Material", key=f"{key_prefix}_add", use_container_width=True):
         if not str(item).strip():
             st.error("Specify the material name.")
-        elif qty <= 0:
+        elif total_qty <= 0:
             st.error("Enter a quantity/weight greater than zero.")
         else:
             colour_val = variant if (variant and not is_size_family) else ""
             size_val = variant if (variant and is_size_family) else ""
             item_label = f"{item} ({variant})" if variant else item
             with connect() as conn:
-                conn.execute("""INSERT INTO stage_material_usage(order_id,stage,item_name,colour,size,quantity,unit,material_action,recorded_by,recorded_at)
-                                VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                             (row.order_id, stage, item, colour_val, size_val, qty, unit, action, by, now_iso()))
+                conn.execute("""INSERT INTO stage_material_usage(order_id,stage,item_name,colour,size,quantity,unit,material_action,recorded_by,recorded_at,base_quantity,multiplier)
+                                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                             (row.order_id, stage, item, colour_val, size_val, total_qty, unit, action, by, now_iso(), qty, multiplier))
                 if action == "Request from Procurement":
                     conn.execute("""INSERT INTO order_material_requirements(order_id,requested_by,item_name,quantity_required,unit,requirement_status,requested_at)
                                     VALUES(?,?,?,?,?,?,?)""",
-                                 (row.order_id, by, item_label, qty, unit, "Submitted", now_iso()))
+                                 (row.order_id, by, item_label, total_qty, unit, "Submitted", now_iso()))
                 conn.commit()
-            audit_log(row.order_id, "Stage Material Recorded", stage, f"{item_label}: {qty} {unit} — {action}", by)
+            audit_log(row.order_id, "Stage Material Recorded", stage, f"{item_label}: {qty:g} x {multiplier:g} = {total_qty:g} {unit} — {action}", by)
             st.success("Material recorded.")
             st.rerun()
     usage = load_table("stage_material_usage")
     usage = usage[(usage["order_id"] == row.order_id) & (usage["stage"] == stage)] if not usage.empty else usage
-    table(usage, ["item_name","colour","size","quantity","unit","material_action","recorded_by","recorded_at"])
+    table(usage, ["id","item_name","colour","size","base_quantity","multiplier","quantity","unit","material_action","recorded_by","recorded_at"])
+
+    if not usage.empty and st.session_state.get("is_hod"):
+        st.markdown("##### 👑 HOD: Correct or Remove an Entry")
+        st.caption("If a team member made a mistake logging a material — wrong quantity, wrong item, wrong unit — fix it here. Team members should ask their HOD to make this correction.")
+        pick_id = st.selectbox("Select entry to correct", usage["id"].tolist(), key=f"{key_prefix}_hod_pick")
+        entry = usage[usage["id"] == pick_id].iloc[0]
+        ca, cb, cc = st.columns(3)
+        fix_item = ca.text_input("Material name", value=disp(entry.get("item_name")), key=f"{key_prefix}_hod_item")
+        fix_qty = cb.number_input("Quantity (final total)", min_value=0.0, step=0.5, value=float(entry.get("quantity") or 0), key=f"{key_prefix}_hod_qty")
+        fix_unit = cc.selectbox("Unit", ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml", "teaspoon", "tablespoon"],
+                                 index=(["kg", "grams", "pieces", "trays", "boxes", "litres", "ml", "teaspoon", "tablespoon"].index(entry.get("unit")) if entry.get("unit") in ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml", "teaspoon", "tablespoon"] else 0),
+                                 key=f"{key_prefix}_hod_unit")
+        hod_name = st.text_input("Corrected by (HOD)", value=st.session_state.get("staff_name", ""), key=f"{key_prefix}_hod_by")
+        fix_col, del_col = st.columns(2)
+        if fix_col.button("💾 Save Correction", key=f"{key_prefix}_hod_save", use_container_width=True):
+            with connect() as conn:
+                conn.execute("UPDATE stage_material_usage SET item_name=?, quantity=?, unit=?, edited_by=?, edited_at=? WHERE id=?",
+                             (fix_item.strip(), fix_qty, fix_unit, hod_name, now_iso(), int(pick_id)))
+                conn.commit()
+            audit_log(row.order_id, "Material Entry Corrected by HOD", stage, f"Entry #{pick_id} → {fix_item}: {fix_qty} {fix_unit}", hod_name)
+            st.success("Entry corrected."); st.rerun()
+        if del_col.button("🗑️ Delete Entry", key=f"{key_prefix}_hod_delete", use_container_width=True):
+            with connect() as conn:
+                conn.execute("DELETE FROM stage_material_usage WHERE id=?", (int(pick_id),))
+                conn.commit()
+            audit_log(row.order_id, "Material Entry Deleted by HOD", stage, f"Entry #{pick_id} ({disp(entry.get('item_name'))}) removed", hod_name)
+            st.success("Entry deleted."); st.rerun()
+    elif not usage.empty:
+        st.caption("Spotted a mistake in one of these entries? Ask your Head of Department to correct or remove it.")
     return not usage.empty
 
 
@@ -1432,6 +1482,21 @@ def order_card(row, extra=None):
         elif path and isinstance(path, str) and Path(path).exists():
             st.markdown("**📷 Customer Reference Image**")
             st.image(path, caption="What the customer wants — refer to this at every stage", width=420)
+
+    order_id_for_videos = row.get("order_id") if hasattr(row, "get") else getattr(row, "order_id", None)
+    if order_id_for_videos:
+        with connect() as _vconn:
+            _vconn.row_factory = sqlite3.Row
+            vid_rows = _vconn.execute(
+                "SELECT filename, mime_type, data_base64 FROM order_videos WHERE order_id=? ORDER BY id", (order_id_for_videos,)
+            ).fetchall()
+        if vid_rows:
+            st.markdown(f"**🎥 Customer Reference Video(s)** — {len(vid_rows)} uploaded")
+            for vr in vid_rows:
+                try:
+                    st.video(base64.b64decode(vr["data_base64"]), format=vr["mime_type"] or "video/mp4")
+                except Exception:
+                    st.caption(f"Couldn't preview {vr['filename']} — file may be corrupted.")
 
 
 def table(df, columns):
@@ -1819,6 +1884,8 @@ def render_customer_care():
         design = st.text_area("Description of Design *" if product_type not in SHORT_PIPELINE_PRODUCTS else "Order Notes *")
         imgs = st.file_uploader("Customer Reference Image(s)", type=["jpg","jpeg","png"], accept_multiple_files=True,
                                  help="Upload more than one if the instructions call for combining ideas from different images (e.g. one for the cake, another for the topper style).")
+        vids = st.file_uploader("Customer Reference Video(s)", type=["mp4","mov","webm","m4v"], accept_multiple_files=True,
+                                 help="For clients who send a short video instead of (or alongside) photos.")
 
         if product_type == "Cake":
             st.markdown("### Topper Requirements")
@@ -1883,6 +1950,11 @@ def render_customer_care():
         if amount_paid > total_price: st.error("Amount paid cannot be greater than total price."); return
         if delivery_window_end <= delivery_window_start: st.error("Delivery window end must be after the start time."); return
         if missing: st.error("Please complete: " + ", ".join(missing)); return
+        oversized = [v.name for v in (vids or []) if len(v.getbuffer()) > MAX_VIDEO_SIZE_BYTES]
+        if oversized:
+            st.error(f"These video(s) are over the {MAX_VIDEO_SIZE_BYTES // (1024*1024)}MB limit and can't be uploaded: "
+                     f"{', '.join(oversized)}. Please trim or compress the clip and try again.")
+            return
 
         order_id = generate_order_id()
         image_path = ""
@@ -1900,6 +1972,16 @@ def render_customer_care():
                 image_path = str(target)
                 image_base64 = data_uri
         images_json = json.dumps(all_images_b64) if all_images_b64 else ""
+
+        video_records = []
+        for idx, one_vid in enumerate(vids or []):
+            v_suffix = Path(one_vid.name).suffix.lower()
+            v_bytes = bytes(one_vid.getbuffer())
+            v_mime = {"mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm", "m4v": "video/x-m4v"}.get(v_suffix.lstrip("."), "video/mp4")
+            video_records.append({
+                "filename": one_vid.name, "mime_type": v_mime,
+                "data_base64": base64.b64encode(v_bytes).decode(), "file_size_bytes": len(v_bytes),
+            })
 
         balance = max(total_price - amount_paid, 0)
         if payment_arrangement == "No Deposit / Pay on Delivery":
@@ -1936,6 +2018,13 @@ def render_customer_care():
             "topper_status": "Pending Assignment" if topper_required=="Yes" else "Not Required",
             "order_created_at": now_iso(), "last_updated_at": now_iso(), "last_updated_by": created_by.strip(),
         })
+        if video_records:
+            with connect() as conn:
+                for vr in video_records:
+                    conn.execute("""INSERT INTO order_videos(order_id, filename, mime_type, data_base64, file_size_bytes, uploaded_at)
+                                    VALUES(?,?,?,?,?,?)""",
+                                 (order_id, vr["filename"], vr["mime_type"], vr["data_base64"], vr["file_size_bytes"], now_iso()))
+                conn.commit()
         if sold_from_inventory == "Yes" and inventory_batch_id is not None:
             with connect() as conn:
                 conn.execute("""UPDATE baked_cookie_inventory SET quantity_available = MAX(quantity_available - ?, 0),
@@ -3641,8 +3730,12 @@ def render_backup_restore():
                 check_conn = sqlite3.connect(temp_path)
                 order_count = check_conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
                 account_count = check_conn.execute("SELECT COUNT(*) FROM staff_accounts").fetchone()[0]
+                try:
+                    video_count = check_conn.execute("SELECT COUNT(*) FROM order_videos").fetchone()[0]
+                except sqlite3.OperationalError:
+                    video_count = 0
                 check_conn.close()
-                st.info(f"This backup contains **{order_count} order(s)** and **{account_count} staff account(s)**.")
+                st.info(f"This backup contains **{order_count} order(s)**, **{account_count} staff account(s)**, and **{video_count} reference video(s)**.")
                 confirm = st.checkbox("I understand this will overwrite all current data with this backup", key="restore_confirm")
                 if st.button("🔁 Restore This Backup", disabled=not confirm, use_container_width=True):
                     import shutil
