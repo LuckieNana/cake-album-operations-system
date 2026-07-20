@@ -66,7 +66,7 @@ STANDARD_FLAVOURS = ["Vanilla", "Chocolate", "Red Velvet", "Lemon", "Coconut", "
                      "Blueberry", "Butterscotch", "Raspberry", "Caramel", "Marble", "Carrot", "Black Forest",
                      "Fruit Cake", "Other"]
 STANDARD_CAKE_SIZES = ["6", "8", "9", "10", "12", "14", "16", "18", "20", "Custom"]
-CAKE_CATEGORIES = ["Wedding", "Birthday", "Baby Shower", "Bridal Shower", "Introduction / Kuhingira",
+CAKE_CATEGORIES = ["Wedding", "Anniversary", "Birthday", "Baby Shower", "Bridal Shower", "Introduction / Kuhingira",
                     "Graduation", "Christmas", "New Year's", "Baptism", "Confirmation", "Holy Communion",
                     "Corporate Event", "Other"]
 DOZEN_COUNTS = {"Half Dozen (6)": 6, "1 Dozen (12)": 12, "2 Dozens (24)": 24, "3 Dozens (36)": 36, "4 Dozens (48)": 48}
@@ -963,7 +963,7 @@ MATERIAL_VARIANTS = {
 
 STAGE_MATERIALS = {
     "Baking": [
-        "Flour", "Sugar", "Raisins", "Caramel",  # baking-only
+        "Flour", "Sugar", "Eggs", "Raisins", "Caramel",  # baking-only
         "Vanilla Extract", "Lemon Emulsion", "Icing Sugar", "Prestige",  # used by both Baking and Decor
         "Glucose", "Milk", "Yogurt", "Cooking Oil", "Soap", "Lemons", "Oranges", "Coconut Cream", "Vinegar",
         "Gypsy", "Kimbo", "Dark Cocoa Powder", "Milk Powder Flavor", "Baking Powder", "Moulds",
@@ -975,7 +975,7 @@ STAGE_MATERIALS = {
     "Filling / Piling": ["Icing Sugar", "Eggs", "Buttercream", "Cake Boards", "Dowels", "Other"],
     "Coating / Covering": ["Fondant", "Icing Sugar", "Glucose", "Glycerine", "Pradip", "Gelatin", "Colour", "CMC", "Other"],
     "Decoration": [
-        "Vanilla Extract", "Lemon Emulsion", "Icing Sugar", "Prestige",  # used by both Baking and Decor
+        "Vanilla Extract", "Lemon Emulsion", "Icing Sugar", "Prestige", "Eggs",  # used by both Baking and Decor
         "Gelatin", "Corn Flour", "Glycerine",  # decor-only
         "Chocolates", "Maimun Colors 240ml", "Maimun Colours 50ml", "Pradip",
         "Flowers", "Balls", "Palm Leaf", "Butterflies", "Crowns", "Topper Paper",
@@ -2297,8 +2297,17 @@ def render_production_planning():
             table(available, ["id","date_baked","flavour","cake_size_value","cake_shape","layers_available","quantity_available","baker","storage_location","inventory_status"])
             if not available.empty:
                 inv_id = st.selectbox("Reserve baked inventory item", available["id"].tolist())
+                st.caption("Same as a fresh order — assign the piler, coverer, and decorator who'll take this cake forward now, so it doesn't sit unassigned once it reaches Piling.")
+                _,_pilers_inv,_coverers_inv,_decorators_inv,_ = staff_lists()
+                a,b,c = st.columns(3)
+                inv_piler = a.multiselect("Piler(s)", _pilers_inv, format_func=first_name, key="pp_inv_piler")
+                inv_coverer = b.multiselect("Coverer(s)", _coverers_inv, format_func=first_name, key="pp_inv_coverer")
+                inv_decorator = c.multiselect("Decorator(s)", _decorators_inv, format_func=first_name, key="pp_inv_decorator")
                 by_inv = st.text_input("Reserved by", value="Production Manager", key="reserve_by")
                 if st.button("⚡ Reserve Inventory Cake and Skip Baking", use_container_width=True):
+                    piler_val = ", ".join(inv_piler)
+                    coverer_val = ", ".join(inv_coverer)
+                    decorator_val = ", ".join(inv_decorator)
                     with connect() as conn:
                         # Reserve without reducing layers yet. The Piler confirms actual layers used.
                         conn.execute("""UPDATE baked_cake_inventory SET inventory_status='Reserved',
@@ -2307,9 +2316,13 @@ def render_production_planning():
                         conn.commit()
                     update_order(row.order_id, {
                         "inventory_reservation_id":int(inv_id), "workflow_status":"Piling Incoming",
-                        "current_owner":"Filling / Piling", "next_action":"Piler to accept reserved baked cake"
-                    }, by_inv, "Baked Inventory Reserved — Baking Skipped", "Production Planning")
-                    st.success("Inventory reserved. Baking skipped; cake sent to Piling."); st.rerun()
+                        "current_owner":"Filling / Piling", "next_action":"Piler to accept reserved baked cake",
+                        "piler_assigned": piler_val, "coverer_assigned": coverer_val, "decorator_assigned": decorator_val,
+                    }, by_inv, "Baked Inventory Reserved — Baking Skipped, Team Pre-Assigned", "Production Planning")
+                    st.success(f"Inventory reserved and team pre-assigned "
+                               f"(Piler: {piler_val or 'none yet'}, Coverer: {coverer_val or 'none yet'}, Decorator: {decorator_val or 'none yet'}). "
+                               f"Cake sent to Piling.")
+                    st.rerun()
 
         bakers,pilers,coverers,decorators,_ = staff_lists()
         ptype = row.get("product_type") or "Cake"
