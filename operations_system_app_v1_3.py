@@ -63,10 +63,10 @@ PRODUCT_SIZE_MODE = {
 DOZEN_OPTIONS = ["Half Dozen (6)", "1 Dozen (12)", "2 Dozens (24)", "3 Dozens (36)", "4 Dozens (48)", "Custom"]
 
 STANDARD_FLAVOURS = ["Vanilla", "Chocolate", "Red Velvet", "Lemon", "Coconut", "Banana", "Strawberry",
-                     "Blueberry", "Butterscotch", "Raspberry", "Caramel", "Marble", "Carrot", "Black Forest",
+                     "Blueberry", "Butterscotch", "Bubble Gum", "Caramel", "Marble", "Carrot", "Black Forest",
                      "Fruit Cake", "Lemon Poppy", "Madeira", "Courgette", "Confetti", "Vanilla Sponge",
                      "Orange", "White Forest", "Other"]
-STANDARD_CAKE_SIZES = ["6", "8", "9", "10", "12", "14", "16", "18", "20", "Custom"]
+STANDARD_CAKE_SIZES = ["6", "7", "8", "9", "10", "12", "14", "16", "18", "20", "Custom"]
 CAKE_CATEGORIES = ["Wedding", "Anniversary", "Birthday", "Baby Shower", "Bridal Shower", "Introduction / Kuhingira",
                     "Graduation", "Christmas", "New Year's", "Baptism", "Confirmation", "Holy Communion",
                     "Corporate Event", "Other"]
@@ -988,7 +988,7 @@ STAGE_MATERIALS = {
         "Icing Sugar", "Eggs",  # used by both Baking and Decor
         "Corn Flour",  # decor-only
         "Chocolates", "Maimun Colors 240ml", "Maimun Colours 50ml", "Pradip",
-        "Fondant", "Waffle Paper", "Ice Cream Cones", "Pearls",
+        "Fondant", "Waffle Paper", "Ice Cream Cones", "Pearls", "Candles", "Gold Leaves",
         "Flowers", "Balls", "Palm Leaf", "Butterflies", "Crowns", "Topper Paper",
         "Super Glue", "Scissors", "Cutters", "Rolling Pin",
         "Cake Album Stickers", "Cookie Stickers",
@@ -1340,14 +1340,19 @@ def disp(v):
 
 
 def first_name(value):
-    """Display exactly one given name per person while retaining full names internally."""
+    """Display exactly one given name per person while retaining full names internally.
+    Special-cased so 'Uncle Joe' stays whole rather than showing just 'Uncle'."""
     shown = disp(value)
     if shown == "—":
         return shown
     people = [person.strip() for person in str(shown).replace(";", ",").split(",") if person.strip()]
     cleaned = []
     for person in people:
-        token = person.replace("(", " ").replace(")", " ").strip().split()[0] if person.strip() else person
+        clean_person = person.replace("(", " ").replace(")", " ").strip()
+        if clean_person.lower().startswith("uncle "):
+            token = " ".join(clean_person.split()[:2])
+        else:
+            token = clean_person.split()[0] if clean_person else person
         cleaned.append(token)
     return ", ".join(cleaned)
 
