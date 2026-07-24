@@ -63,10 +63,10 @@ PRODUCT_SIZE_MODE = {
 DOZEN_OPTIONS = ["Half Dozen (6)", "1 Dozen (12)", "2 Dozens (24)", "3 Dozens (36)", "4 Dozens (48)", "Custom"]
 
 STANDARD_FLAVOURS = ["Vanilla", "Chocolate", "Red Velvet", "Lemon", "Coconut", "Banana", "Strawberry",
-                     "Blueberry", "Butterscotch", "Raspberry", "Caramel", "Marble", "Carrot", "Black Forest",
+                     "Blueberry", "Butterscotch", "Bubble Gum", "Caramel", "Marble", "Carrot", "Black Forest",
                      "Fruit Cake", "Lemon Poppy", "Madeira", "Courgette", "Confetti", "Vanilla Sponge",
                      "Orange", "White Forest", "Other"]
-STANDARD_CAKE_SIZES = ["6", "8", "9", "10", "12", "14", "16", "18", "20", "Custom"]
+STANDARD_CAKE_SIZES = ["6", "7", "8", "9", "10", "12", "14", "16", "18", "20", "Custom"]
 CAKE_CATEGORIES = ["Wedding", "Anniversary", "Birthday", "Baby Shower", "Bridal Shower", "Introduction / Kuhingira",
                     "Graduation", "Christmas", "New Year's", "Baptism", "Confirmation", "Holy Communion",
                     "Corporate Event", "Other"]
@@ -700,6 +700,13 @@ def ensure_base_schema():
             id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, stage TEXT NOT NULL, role_label TEXT,
             staff_column TEXT, current_value TEXT, proposed_value TEXT, requested_by TEXT, reason TEXT,
             status TEXT DEFAULT 'Pending', requested_at TEXT, decided_by TEXT, decided_at TEXT, decision_notes TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS baking_batches(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, batch_number TEXT UNIQUE, batch_date TEXT, flavour TEXT,
+            cake_size_value REAL, cake_shape TEXT, total_layers_requested INTEGER, actual_layers_baked INTEGER,
+            status TEXT DEFAULT 'Pending', assigned_baker TEXT, mixer_assigned TEXT, oven_person_assigned TEXT,
+            created_by TEXT, created_at TEXT, baking_started_at TEXT, completed_at TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS baking_batch_orders(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id INTEGER NOT NULL, order_id TEXT NOT NULL, layers_needed INTEGER)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS order_videos(
             id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, filename TEXT, mime_type TEXT,
             data_base64 TEXT NOT NULL, file_size_bytes INTEGER, uploaded_at TEXT)""")
@@ -760,6 +767,7 @@ def ensure_release_2_schema():
             "cake_height_inches": "REAL",
             "mixer_assigned": "TEXT",
             "oven_person_assigned": "TEXT",
+            "baking_batch_number": "TEXT",
             "is_multi_tier": "TEXT DEFAULT 'No'",
             "tier_count": "INTEGER DEFAULT 1",
             "tier_details_json": "TEXT",
@@ -988,7 +996,7 @@ STAGE_MATERIALS = {
         "Icing Sugar", "Eggs",  # used by both Baking and Decor
         "Corn Flour",  # decor-only
         "Chocolates", "Maimun Colors 240ml", "Maimun Colours 50ml", "Pradip",
-        "Fondant", "Waffle Paper", "Ice Cream Cones", "Pearls",
+        "Fondant", "Waffle Paper", "Ice Cream Cones", "Pearls", "Candles", "Gold Leaves",
         "Flowers", "Balls", "Palm Leaf", "Butterflies", "Crowns", "Topper Paper",
         "Super Glue", "Scissors", "Cutters", "Rolling Pin",
         "Cake Album Stickers", "Cookie Stickers",
@@ -1340,14 +1348,19 @@ def disp(v):
 
 
 def first_name(value):
-    """Display exactly one given name per person while retaining full names internally."""
+    """Display exactly one given name per person while retaining full names internally.
+    Special-cased so 'Uncle Joe' stays whole rather than showing just 'Uncle'."""
     shown = disp(value)
     if shown == "—":
         return shown
     people = [person.strip() for person in str(shown).replace(";", ",").split(",") if person.strip()]
     cleaned = []
     for person in people:
-        token = person.replace("(", " ").replace(")", " ").strip().split()[0] if person.strip() else person
+        clean_person = person.replace("(", " ").replace(")", " ").strip()
+        if clean_person.lower().startswith("uncle "):
+            token = " ".join(clean_person.split()[:2])
+        else:
+            token = clean_person.split()[0] if clean_person else person
         cleaned.append(token)
     return ", ".join(cleaned)
 
@@ -2364,7 +2377,75 @@ def render_production_planning():
         table(df[df["workflow_status"].isin(pipeline_statuses)] if "workflow_status" in df.columns else df.iloc[0:0],
               ["order_id","customer_name","urgency_level","baker_assigned","piler_assigned","coverer_assigned","decorator_assigned","workflow_status","next_action"])
 
-    st.markdown("## 🎂 Fresh Cakes for the Day")
+    st.markdown("## 🧮 Batch Baking Plan")
+    st.caption("Bakers asked to receive grouped totals (e.g. 'bake 12 layers of Vanilla, 8-inch') rather than individual customer orders one at a time. "
+               "This groups everything waiting to be baked by flavour and size, so you can hand bakers one clear number per flavour instead of a stack of separate orders. "
+               "All the math — who needs how many layers, and from which orders — happens here; bakers never see customer names or images, just the totals to bake.")
+    batchable = filter_orders(df, ["Deposit Confirmed"])
+    batchable = batchable[batchable["product_type"] == "Cake"] if not batchable.empty and "product_type" in batchable.columns else batchable
+    if batchable.empty:
+        st.caption("No cake orders currently waiting to be grouped into a batch.")
+    else:
+        grouped = batchable.copy()
+        grouped["layers_needed"] = pd.to_numeric(grouped["final_approved_layers"], errors="coerce").fillna(
+            pd.to_numeric(grouped["number_of_layers"], errors="coerce")).fillna(1)
+        summary = grouped.groupby(["flavours", "cake_size_value", "cake_shape"]).agg(
+            total_layers=("layers_needed", "sum"), order_count=("order_id", "count"),
+            order_ids=("order_id", lambda x: ", ".join(x))).reset_index()
+        st.markdown("#### Ready to Group Into Batches")
+        table(summary, ["flavours", "cake_size_value", "cake_shape", "total_layers", "order_count", "order_ids"])
+        summary["group_label"] = summary.apply(lambda r: f"{r['flavours']} — {r['cake_size_value']:g}\" {r['cake_shape']} ({int(r['total_layers'])} layers, {int(r['order_count'])} order(s))", axis=1)
+        pick_label = st.selectbox("Select a group to turn into a batch", summary["group_label"].tolist(), key="pp_batch_pick")
+        pick_row = summary[summary["group_label"] == pick_label].iloc[0]
+        _bakers_b, _, _, _, _ = staff_lists()
+        a, b, c = st.columns(3)
+        batch_baker = a.selectbox("Assigned Baker", _bakers_b, format_func=first_name, key="pp_batch_baker")
+        batch_mixer = b.multiselect("Mixer(s)", _bakers_b, format_func=first_name, key="pp_batch_mixer")
+        batch_oven = c.multiselect("Oven Person(s)", _bakers_b, format_func=first_name, key="pp_batch_oven")
+        batch_by = st.text_input("Planned by", value=st.session_state.get("staff_name", "Production Manager"), key="pp_batch_by")
+        if st.button("🧮 Create Batch From This Group", width='stretch'):
+            matching_orders = grouped[
+                (grouped["flavours"] == pick_row["flavours"]) &
+                (grouped["cake_size_value"] == pick_row["cake_size_value"]) &
+                (grouped["cake_shape"] == pick_row["cake_shape"])
+            ]
+            batch_date = date.today().isoformat()
+            with connect() as conn:
+                seq = conn.execute("SELECT COUNT(*) FROM baking_batches WHERE batch_date=?", (batch_date,)).fetchone()[0] + 1
+                flavour_slug = "".join(ch for ch in str(pick_row["flavours"])[:10] if ch.isalnum()) or "Batch"
+                batch_number = f"B-{batch_date}-{flavour_slug}-{seq:02d}"
+                cur = conn.execute("""INSERT INTO baking_batches(batch_number, batch_date, flavour, cake_size_value, cake_shape,
+                                    total_layers_requested, status, assigned_baker, mixer_assigned, oven_person_assigned, created_by, created_at)
+                                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                   (batch_number, batch_date, pick_row["flavours"], pick_row["cake_size_value"], pick_row["cake_shape"],
+                                    int(pick_row["total_layers"]), "Pending", batch_baker, ", ".join(batch_mixer), ", ".join(batch_oven),
+                                    batch_by, now_iso()))
+                batch_id = cur.lastrowid
+                for _, orow in matching_orders.iterrows():
+                    conn.execute("INSERT INTO baking_batch_orders(batch_id, order_id, layers_needed) VALUES(?,?,?)",
+                                 (batch_id, orow["order_id"], int(orow["layers_needed"])))
+                    conn.execute("""UPDATE orders SET workflow_status='Production Planned', current_owner='Baking',
+                                    baking_batch_number=?, next_action=?, baker_assigned=?, mixer_assigned=?, oven_person_assigned=?
+                                    WHERE order_id=?""",
+                                 (batch_number, f"Bake as part of batch {batch_number}", batch_baker, ", ".join(batch_mixer), ", ".join(batch_oven), orow["order_id"]))
+                conn.commit()
+            audit_log(None, "Baking Batch Created", "Production Planning",
+                      f"Batch {batch_number}: {pick_row['flavours']} {pick_row['cake_size_value']:g}\" {pick_row['cake_shape']} — "
+                      f"{int(pick_row['total_layers'])} layers across {int(pick_row['order_count'])} order(s)", batch_by)
+            st.success(f"Batch {batch_number} created — {int(pick_row['total_layers'])} layers of {pick_row['flavours']} assigned to {first_name(batch_baker)}.")
+            st.rerun()
+
+    active_batches = load_table("baking_batches")
+    active_batches = active_batches[active_batches["status"] != "Complete"] if not active_batches.empty else active_batches
+    if not active_batches.empty:
+        st.markdown("#### Active Batches")
+        table(active_batches.sort_values("created_at", ascending=False),
+              ["batch_number", "batch_date", "flavour", "cake_size_value", "cake_shape", "total_layers_requested",
+               "assigned_baker", "status", "created_at"])
+    st.divider()
+
+    st.markdown("## 🎂 Individual Orders (exceptions, urgent, or non-cake items)")
+    st.caption("Cookies, cupcakes, loaves, layers, and any order needing individual handling still go through here — batching above is specifically for grouping regular multi-layer cakes.")
     pp_queue = filter_orders(df,["Deposit Confirmed"])
     render_queue_table(pp_queue, "Orders Awaiting Production Assignment")
     row = select_order(pp_queue, "pp_order")
@@ -2410,23 +2491,23 @@ def render_production_planning():
         st.markdown("### Fresh Production Assignment")
         st.caption("Baking team breakdown: who's in charge, who's mixing, and who's on the oven for this job.")
         if is_short_pipeline:
-            a, b, c = st.columns(3)
+            a, b = st.columns(2)
             baker = a.selectbox("Baker (In Charge)", bakers, format_func=first_name)
+            by = b.text_input("Updated by", value="Production Manager")
             mixer = st.multiselect("Mixer(s)", bakers, format_func=first_name, key="pp_mixer_multi")
             oven_person = st.multiselect("Oven Person(s)", bakers, format_func=first_name, key="pp_oven_multi")
             st.info(f"{PRODUCT_BADGE.get(ptype, ('',''))[0]} order — goes straight from Baking to Packaging, so only baking roles are needed here.")
             piler, coverer, decorator = "N/A", "N/A", "N/A"
-            by = c.text_input("Updated by", value="Production Manager")
             topper_owner = "N/A"
         else:
-            a,b,c,d,e = st.columns(5)
+            a, b = st.columns(2)
             baker = a.selectbox("Baker (In Charge)", bakers, format_func=first_name)
+            by = b.text_input("Updated by", value="Production Manager")
             mixer = st.multiselect("Mixer(s)", bakers, format_func=first_name, key="pp_mixer_multi")
             oven_person = st.multiselect("Oven Person(s)", bakers, format_func=first_name, key="pp_oven_multi")
             piler = st.multiselect("Piler(s)", pilers, format_func=first_name, key="pp_piler_multi")
             coverer = st.multiselect("Coverer(s)", coverers, format_func=first_name, key="pp_coverer_multi")
             decorator = st.multiselect("Decorator(s)", decorators, format_func=first_name, key="pp_decorator_multi")
-            by = e.text_input("Updated by", value="Production Manager")
             topper_owner = "Keith"
             if str(row.get("topper_required")) == "Yes":
                 st.markdown("### 🎨 Design & Innovation / Topper Assignment")
@@ -2547,9 +2628,10 @@ def render_baking():
     page_header("🍰 Baking", "Bake layers, submit for baking check, and correct rejected cakes.")
     df = load_orders()
     render_hod_overview("Baking", df)
-    t1,t2,t3,t4,t5,t6,t7 = st.tabs(["Assigned", "In Progress", "Correction Required", "Daily Baking Plan", "Baked Cake Inventory", "🍪 Baked Cookie Inventory", "🌡️ Oven Log"])
+    t1,t2,t3,t4,t5,t6,t7,t8 = st.tabs(["Assigned", "In Progress", "Correction Required", "Daily Baking Plan", "Baked Cake Inventory", "🍪 Baked Cookie Inventory", "🌡️ Oven Log", "🧮 Batch Board"])
     with t1:
         assigned_q = filter_orders(df,["Production Planned"])
+        assigned_q = assigned_q[assigned_q["baking_batch_number"].isna() | (assigned_q["baking_batch_number"] == "")] if not assigned_q.empty and "baking_batch_number" in assigned_q.columns else assigned_q
         render_queue_table(assigned_q, "Cakes Assigned To Baking", ["baker_assigned", "mixer_assigned", "oven_person_assigned"])
         row = select_order(assigned_q, "bake_assigned")
         if row is not None:
@@ -2797,6 +2879,62 @@ def render_baking():
                   ["order_id", "flavour", "product_type", "start_temp_c", "stop_temp_c", "temp_change_c",
                    "oven_start_at", "oven_stop_at", "duration_minutes", "recorded_by_start", "recorded_by_stop"])
 
+    with t8:
+        st.markdown("### 🧮 Batch Board")
+        st.caption("What Production Planning has grouped for you to bake — totals only, no customer names or images. "
+                   "Log materials against the batch as a whole, then confirm how many layers actually came out once you're done.")
+        batches = load_table("baking_batches")
+        pending_batches = batches[batches["status"].isin(["Pending", "Baking"])] if not batches.empty else batches
+        if pending_batches.empty:
+            st.info("No batches assigned to you right now.")
+        else:
+            table(pending_batches.sort_values("created_at", ascending=False),
+                  ["batch_number", "batch_date", "flavour", "cake_size_value", "cake_shape",
+                   "total_layers_requested", "assigned_baker", "mixer_assigned", "oven_person_assigned", "status"])
+            pick_batch = st.selectbox("Select a batch to work on", pending_batches["batch_number"].tolist(), key="batch_board_pick")
+            brow = pending_batches[pending_batches["batch_number"] == pick_batch].iloc[0]
+            st.markdown(f"#### Batch {brow['batch_number']} — {brow['flavour']}, {brow['cake_size_value']:g}\" {brow['cake_shape']}")
+            st.info(f"**Total layers to bake: {int(brow['total_layers_requested'])}** · Baker: {first_name(brow.get('assigned_baker'))} · "
+                    f"Mixer: {first_name(brow.get('mixer_assigned')) or '—'} · Oven: {first_name(brow.get('oven_person_assigned')) or '—'}")
+            linked = load_table("baking_batch_orders")
+            linked = linked[linked["batch_id"] == brow["id"]] if not linked.empty else linked
+            st.caption(f"This batch covers {len(linked)} order(s) — {int(linked['layers_needed'].sum()) if not linked.empty else 0} layers combined.")
+
+            class _BatchRow:
+                order_id = brow["batch_number"]
+                def get(self, k, default=None):
+                    return default
+            render_stage_material_planning("Baking", _BatchRow(), brow.get("assigned_baker"))
+
+            by = st.text_input("Updated by", value=first_name(brow.get("assigned_baker")), key="batch_by")
+            if brow["status"] == "Pending":
+                if st.button("▶️ Start Baking This Batch", width='stretch', key="batch_start_btn"):
+                    with connect() as conn:
+                        conn.execute("UPDATE baking_batches SET status='Baking', baking_started_at=? WHERE id=?", (now_iso(), int(brow["id"])))
+                        conn.commit()
+                    st.rerun()
+            else:
+                st.markdown("##### Confirm Actual Layers Baked")
+                actual = st.number_input("Layers actually baked", min_value=0, step=1,
+                                          value=int(brow["total_layers_requested"]), key="batch_actual_layers")
+                if st.button("✅ Confirm Batch Complete → Send All Orders to Piling", width='stretch', key="batch_complete_btn"):
+                    with connect() as conn:
+                        conn.execute("UPDATE baking_batches SET status='Complete', actual_layers_baked=?, completed_at=? WHERE id=?",
+                                     (int(actual), now_iso(), int(brow["id"])))
+                        conn.commit()
+                        for _, lrow in linked.iterrows():
+                            conn.execute("""UPDATE orders SET workflow_status='Piling Incoming', current_owner='Filling / Piling',
+                                          next_action=? WHERE order_id=?""",
+                                         (f"Piler to pick from batch {brow['batch_number']}", lrow["order_id"]))
+                        conn.commit()
+                    if int(actual) < int(brow["total_layers_requested"]):
+                        st.warning(f"⚠️ Only {actual} of {int(brow['total_layers_requested'])} requested layers were baked — "
+                                   f"flag this shortfall to Production Planning so they can decide which orders it affects. "
+                                   f"All {len(linked)} order(s) in this batch have still been sent to Piling.")
+                    else:
+                        st.success(f"Batch complete — all {len(linked)} order(s) sent to Piling, tagged with batch {brow['batch_number']}.")
+                    st.rerun()
+
 
 def render_piling():
     page_header("🎂 Filling / Piling", "Accept baked cakes, pile to correct height, and send to Covering.")
@@ -2805,10 +2943,10 @@ def render_piling():
     t1,t2,t3,t4 = st.tabs(["Incoming from Baking", "In Progress", "Correction Required", "End-of-Day Layer Reconciliation"])
     with t1:
         incoming_q = filter_orders(df,["Piling Incoming"])
-        render_queue_table(incoming_q, "Cakes Incoming From Baking", ["piler_assigned"])
+        render_queue_table(incoming_q, "Cakes Incoming From Baking", ["piler_assigned", "baking_batch_number"])
         row = select_order(incoming_q, "pile_in")
         if row is not None:
-            order_card(row, [("Baker", row.get("baker_assigned")), ("Piler", row.get("piler_assigned"))])
+            order_card(row, [("Baker", row.get("baker_assigned")), ("Piler", row.get("piler_assigned")), ("🧮 Batch Number", row.get("baking_batch_number"))])
             may_act = can_act_on(row, "piler_assigned")
             if not may_act:
                 st.info(f"👀 Viewing only — this job is assigned to **{first_name(row.get('piler_assigned'))}**.")
