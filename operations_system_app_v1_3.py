@@ -67,6 +67,7 @@ STANDARD_FLAVOURS = ["Vanilla", "Chocolate", "Red Velvet", "Lemon", "Coconut", "
                      "Fruit Cake", "Lemon Poppy", "Madeira", "Courgette", "Confetti", "Vanilla Sponge",
                      "Orange", "White Forest", "Other"]
 STANDARD_CAKE_SIZES = ["6", "7", "8", "9", "10", "12", "14", "16", "18", "20", "Custom"]
+COOKIE_FLAVOURS = ["Coconut", "Ginger"]
 CAKE_CATEGORIES = ["Wedding", "Anniversary", "Birthday", "Baby Shower", "Bridal Shower", "Introduction / Kuhingira",
                     "Graduation", "Christmas", "New Year's", "Baptism", "Confirmation", "Holy Communion",
                     "Corporate Event", "Other"]
@@ -416,15 +417,59 @@ def render_staff_greeting():
 
 def render_department_notifications():
     """Shows unread notifications for whichever department is currently logged in —
-    including complaint/accountability notices raised against them."""
+    including complaint/accountability notices raised against them. Also updates the
+    browser tab title with the unread count, and makes a best-effort attempt at a real
+    desktop popup — see the caption below for the honest limits of that second part."""
     dept = st.session_state.get("department")
     if not dept:
         return
     notes = load_table("notifications")
-    if notes.empty:
-        return
-    mine = notes[(notes["target_department"] == dept) & (notes["notification_status"] == "Unread")]
+    mine = notes[(notes["target_department"] == dept) & (notes["notification_status"] == "Unread")] if not notes.empty else notes
     staff_name = st.session_state.get("staff_name", "").strip()
+
+    seen_key = f"_notif_seen_ids_{dept}"
+    seen_ids = st.session_state.get(seen_key, set())
+    current_ids = set(mine["id"].tolist()) if not mine.empty else set()
+    new_ids = current_ids - seen_ids
+    is_first_check = not seen_ids and dept not in st.session_state.get("_notif_dept_checked", set())
+    new_messages = (mine[mine["id"].isin(new_ids)]["message"].tolist() if new_ids else []) if not is_first_check else []
+    st.session_state[seen_key] = current_ids
+    st.session_state.setdefault("_notif_dept_checked", set()).add(dept)
+
+    unread_count = len(current_ids)
+    import json as _json
+    msgs_json = _json.dumps(new_messages[:5])
+    st.components.v1.html(f"""
+    <script>
+    (function() {{
+        // Reliable part: tab title shows the unread count, resetting to normal at zero.
+        // This needs no special browser permission (same-origin access to the parent tab).
+        try {{
+            var base = "Cake Album Operations";
+            window.parent.document.title = {unread_count} > 0 ? ("🔔 (" + {unread_count} + ") " + base) : base;
+        }} catch (e) {{}}
+
+        // Best-effort part: an actual desktop/OS popup via the Notification API. Works in many
+        // setups, but browsers increasingly restrict this inside the sandboxed frame Streamlit
+        // renders custom components in — treat this as a bonus, not a guarantee.
+        if ({msgs_json}.length > 0 && ("Notification" in window)) {{
+            function fire(msgs) {{
+                msgs.forEach(function(m) {{
+                    try {{ new Notification("Cake Album — New Update", {{ body: m }}); }} catch (e) {{}}
+                }});
+            }}
+            if (Notification.permission === "granted") {{
+                fire({msgs_json});
+            }} else if (Notification.permission !== "denied") {{
+                Notification.requestPermission().then(function(p) {{
+                    if (p === "granted") fire({msgs_json});
+                }}).catch(function(e) {{}});
+            }}
+        }}
+    }})();
+    </script>
+    """, height=0)
+
     if mine.empty:
         return
     st.markdown("### 🔔 Notifications")
@@ -768,6 +813,10 @@ def ensure_release_2_schema():
             "mixer_assigned": "TEXT",
             "oven_person_assigned": "TEXT",
             "baking_batch_number": "TEXT",
+            "flavour_preference_note": "TEXT",
+            "centerpiece_team_assigned": "TEXT",
+            "side_cake_team_assigned": "TEXT",
+            "delivery_date": "TEXT",
             "is_multi_tier": "TEXT DEFAULT 'No'",
             "tier_count": "INTEGER DEFAULT 1",
             "tier_details_json": "TEXT",
@@ -978,6 +1027,10 @@ MATERIAL_VARIANTS = {
     "Cake Boards": ["10\"", "12\"", "14\"", "17\""],
     "Wrapping Paper": ["10\"", "12\"", "14\"", "16\"", "17\"", "Other"],
 }
+MATERIAL_VARIANTS = {
+    item: sorted([v for v in variants if v != "Other"]) + (["Other"] if "Other" in variants else [])
+    for item, variants in MATERIAL_VARIANTS.items()
+}
 
 STAGE_MATERIALS = {
     "Baking": [
@@ -996,7 +1049,7 @@ STAGE_MATERIALS = {
         "Icing Sugar", "Eggs",  # used by both Baking and Decor
         "Corn Flour",  # decor-only
         "Chocolates", "Maimun Colors 240ml", "Maimun Colours 50ml", "Pradip",
-        "Fondant", "Waffle Paper", "Ice Cream Cones", "Pearls", "Candles", "Gold Leaves",
+        "Fondant", "Buttercream", "Waffle Paper", "Ice Cream Cones", "Pearls", "Candles", "Gold Leaves",
         "Flowers", "Balls", "Palm Leaf", "Butterflies", "Crowns", "Topper Paper",
         "Super Glue", "Scissors", "Cutters", "Rolling Pin",
         "Cake Album Stickers", "Cookie Stickers",
@@ -1004,6 +1057,12 @@ STAGE_MATERIALS = {
     ],
     "Packaging": ["Cake Boxes", "Wrapping Paper", "Envelopes", "Packing Bags", "Sticker", "Ribbon", "Bag", "Tape", "Other"],
     "Design & Innovation": ["Super Glue", "Stick Glue", "Topper Paper", "Other"],
+}
+# Sort every material list alphabetically (ascending) for faster scanning — "Other" always stays
+# last since it's a fallback/free-text option, not a real item to pick from.
+STAGE_MATERIALS = {
+    stage: sorted([i for i in items if i != "Other"]) + (["Other"] if "Other" in items else [])
+    for stage, items in STAGE_MATERIALS.items()
 }
 
 
@@ -1092,7 +1151,12 @@ def render_stage_material_planning(stage, row, default_by):
         colour_choice = b.selectbox("Colour (if applicable)", MATERIAL_COLOURS, key=f"{key_prefix}_colour")
         variant = "" if colour_choice == "N/A" else colour_choice
     action = c.selectbox("Action", ["Used", "Needed", "Request from Procurement"], key=f"{key_prefix}_action")
-    if is_size_family:
+    skip_measuring = stage == "Decoration" and str(item_choice).strip().lower() in ("fondant", "buttercream")
+    if skip_measuring:
+        st.caption("Decorators don't measure Fondant/Buttercream by quantity — just logging that it was used, "
+                   "since Piling/Covering already measure and record the amounts for these.")
+        qty, unit, multiplier, total_qty = 1.0, "not measured", 1.0, 1.0
+    elif is_size_family:
         qty = st.number_input("Quantity (pieces)", min_value=0.0, step=1.0, key=f"{key_prefix}_qty")
         unit = "pieces"
         multiplier = 1.0
@@ -1454,7 +1518,24 @@ def order_card(row, extra=None):
     if ptype == "Cake":
         html.append(f"<b>Layers:</b> {disp(row.get('number_of_layers'))}<br>")
     html.append(f"<b>Design:</b> {disp(row.get('design_description'))}<br>")
-    html.append(f"<b>Due:</b> {disp(row.get('due_date'))} | <b>Time:</b> {disp(row.get('expected_time'))}<br>")
+    if disp(row.get("flavour_preference_note")) != "—":
+        html.append(f"<b>🍰 Flavour Preference Note:</b> {disp(row.get('flavour_preference_note'))}<br>")
+    if disp(row.get("centerpiece_team_assigned")) != "—" or disp(row.get("side_cake_team_assigned")) != "—":
+        html.append(f"<b>💍 Centerpiece Team:</b> {disp(row.get('centerpiece_team_assigned'))}<br>")
+        html.append(f"<b>💍 Side Cake Team:</b> {disp(row.get('side_cake_team_assigned'))}<br>")
+    due_weekday = ""
+    try:
+        due_weekday = f" ({datetime.strptime(str(row.get('due_date')), '%Y-%m-%d').strftime('%A')})" if disp(row.get("due_date")) != "—" else ""
+    except Exception:
+        pass
+    html.append(f"<b>Due:</b> {disp(row.get('due_date'))}{due_weekday} | <b>Time:</b> {disp(row.get('expected_time'))}<br>")
+    delivery_date_val = row.get("delivery_date")
+    if delivery_date_val and disp(delivery_date_val) != "—" and str(delivery_date_val) != str(row.get("due_date")):
+        try:
+            delivery_weekday = datetime.strptime(str(delivery_date_val), '%Y-%m-%d').strftime('%A')
+            html.append(f"<b>🚚 Delivery Date:</b> {disp(delivery_date_val)} ({delivery_weekday}) <i>— different from due date above</i><br>")
+        except Exception:
+            html.append(f"<b>🚚 Delivery Date:</b> {disp(delivery_date_val)}<br>")
     html.append(window_html)
     html.append(f"<b>Location:</b> {disp(row.get('location'))}<br>")
     if extra:
@@ -1774,6 +1855,44 @@ def render_customer_care():
     render_customer_profile_lookup(df)
     render_followup_complaints_section(df)
 
+    if st.session_state.get("is_hod"):
+        with st.expander("👑 HOD: Correct a Wrongly Entered Order"):
+            st.caption("For mistakes made at order entry — wrong name, phone, flavour, price, date, etc. This edits the order in place; it never has to move through the workflow again.")
+            cc_search = st.text_input("Search by Order ID or customer name", key="cc_hod_search")
+            if cc_search.strip():
+                s = cc_search.strip().lower()
+                cc_matches = df[
+                    df["order_id"].astype(str).str.lower().str.contains(s, na=False) |
+                    df["customer_name"].astype(str).str.lower().str.contains(s, na=False)
+                ] if not df.empty else df
+                if cc_matches.empty:
+                    st.info("No matching orders found.")
+                else:
+                    table(cc_matches, ["order_id", "customer_name", "customer_number", "flavours", "price_ugx", "due_date", "workflow_status"])
+                    cc_pick = st.selectbox("Select an order to correct", cc_matches["order_id"].tolist(), key="cc_hod_pick")
+                    cc_row = cc_matches[cc_matches["order_id"] == cc_pick].iloc[0]
+                    a, b = st.columns(2)
+                    cc_name = a.text_input("Customer name", value=disp(cc_row.get("customer_name")) if disp(cc_row.get("customer_name")) != "—" else "", key="cc_hod_name")
+                    cc_phone = b.text_input("Customer phone", value=disp(cc_row.get("customer_number")) if disp(cc_row.get("customer_number")) != "—" else "", key="cc_hod_phone")
+                    a, b = st.columns(2)
+                    cc_flavours = a.text_input("Flavours", value=disp(cc_row.get("flavours")) if disp(cc_row.get("flavours")) != "—" else "", key="cc_hod_flavours")
+                    cc_price = b.number_input("Price (UGX)", min_value=0.0, step=5000.0, value=float(cc_row.get("price_ugx") or 0), key="cc_hod_price")
+                    a, b = st.columns(2)
+                    cc_location = a.text_input("Delivery / pickup location", value=disp(cc_row.get("location")) if disp(cc_row.get("location")) != "—" else "", key="cc_hod_location")
+                    cc_due_date = b.text_input("Due date (YYYY-MM-DD)", value=disp(cc_row.get("due_date")) if disp(cc_row.get("due_date")) != "—" else "", key="cc_hod_due_date")
+                    cc_design = st.text_area("Design description / notes", value=disp(cc_row.get("design_description")) if disp(cc_row.get("design_description")) != "—" else "", key="cc_hod_design")
+                    cc_by = st.text_input("Corrected by", value=st.session_state.get("staff_name", "Customer Care HOD"), key="cc_hod_by")
+                    if st.button("💾 Save Correction", key="cc_hod_save", width='stretch'):
+                        update_order(cc_row["order_id"], {
+                            "customer_name": cc_name.strip(), "customer_number": cc_phone.strip(),
+                            "flavours": cc_flavours.strip(), "price_ugx": cc_price,
+                            "location": cc_location.strip(), "due_date": cc_due_date.strip(),
+                            "design_description": cc_design.strip(),
+                        }, cc_by, "Manual Entry Correction by Customer Care HOD", "Customer Care")
+                        st.success(f"Order {cc_row['order_id']} corrected."); st.rerun()
+            else:
+                st.caption("Type something above to search.")
+
     st.markdown("### Product Line")
     product_type = st.selectbox("What is this order for?", PRODUCT_TYPES, key="nc_product_type",
                                  help="Cookies, Cake Loaves, Cake Layers, and Cupcakes skip Piling/Covering/Decoration/Studio QC and go straight from Baking to Packaging.")
@@ -1791,7 +1910,11 @@ def render_customer_care():
     st.markdown("### Customer-selected Flavours")
     st.caption("Choose up to four flavours. Leave unused slots as None.")
     _fc1, _fc2, _fc3, _fc4 = st.columns(4)
-    _flavour_options = ["None"] + [f for f in STANDARD_FLAVOURS if f != "Other"] + ["Other"]
+    if product_type == "Cookies":
+        _flavour_options = ["None"] + COOKIE_FLAVOURS
+        st.caption("Cookies come in Coconut or Ginger only.")
+    else:
+        _flavour_options = ["None"] + [f for f in STANDARD_FLAVOURS if f != "Other"] + ["Other"]
     selected_flavours = []
     for _idx, _col in enumerate([_fc1, _fc2, _fc3, _fc4], start=1):
         _choice = _col.selectbox(f"Flavour {_idx}", _flavour_options, key=f"nc_flavour_slot_{_idx}")
@@ -1952,8 +2075,15 @@ def render_customer_care():
             topper_required, topper_wording, topper_notes = "No", "", ""
 
         a,b = st.columns(2)
-        due_date = a.date_input("Due Date")
+        due_date = a.date_input("Due Date (cake ready by)", help="When the cake itself needs to be finished — the baking/production timeline.")
         expected_time = b.time_input("Expected Time", value=dtime(12,0))
+        st.caption(f"📅 {due_date.strftime('%A')}" if due_date else "")
+
+        st.markdown("### Delivery")
+        st.caption("The actual delivery day can be different from when the cake is finished — e.g. cake ready today, delivered tomorrow.")
+        a,b = st.columns(2)
+        delivery_date = a.date_input("Delivery Date", value=due_date, help="The day the cake actually goes out — may be the same as the due date, or later.")
+        st.caption(f"📅 {delivery_date.strftime('%A')}" if delivery_date else "")
 
         st.markdown("### Delivery Window")
         st.caption("The time range the customer expects delivery within — used by Dispatch/Driver.")
@@ -1967,6 +2097,11 @@ def render_customer_care():
             final_layers = st.number_input("Final Approved Layers", min_value=1, step=1, value=int(suggested))
         else:
             final_layers = 0
+
+        flavour_preference_note = st.text_area(
+            "Flavour Preference Note (optional)",
+            placeholder="e.g. Client wants more fruit than blueberry",
+            help="Shown to the Piler and on the order card throughout production — use this for any flavour-balance or layering preference that isn't captured by the flavour list alone.")
 
         payment_arrangement = st.selectbox(
             "Payment Arrangement",
@@ -2048,7 +2183,7 @@ def render_customer_care():
             "order_id": order_id, "customer_name": customer_name.strip(), "customer_number": customer_number.strip(),
             "product_type": product_type, "size_category": size_category, "dozens_quantity": dozens_qty,
             "sold_from_inventory": sold_from_inventory, "inventory_batch_id": inventory_batch_id,
-            "flavours": flavours.strip(), "design_description": design.strip(), "due_date": str(due_date),
+            "flavours": flavours.strip(), "design_description": design.strip(), "due_date": str(due_date), "delivery_date": str(delivery_date),
             "expected_time": str(expected_time), "price_ugx": total_price, "unit_price_ugx": price,
             "order_quantity": int(order_quantity), "is_bulk_order": is_bulk_order,
             "deposit": amount_paid, "balance": balance,
@@ -2062,7 +2197,7 @@ def render_customer_care():
             "cake_size_value": size_value, "cake_size_unit": "Inches", "cake_shape": shape, "cake_height_inches": cake_height,
             "cake_format": cake_format, "icing_type": icing_type,
             "number_of_layers": final_layers, "system_suggested_layers": suggested,
-            "final_approved_layers": final_layers, "reference_image_path": image_path, "reference_image_base64": image_base64,
+            "final_approved_layers": final_layers, "flavour_preference_note": flavour_preference_note.strip(), "reference_image_path": image_path, "reference_image_base64": image_base64,
             "reference_images_json": images_json, "cake_category": cake_category,
             "is_multi_tier": is_multi_tier, "tier_count": int(tier_count), "tier_details_json": json.dumps(tier_details) if tier_details else "",
             "side_cake_count": int(side_cake_count), "side_cake_details_json": json.dumps(side_cake_details) if side_cake_details else "",
@@ -2096,7 +2231,11 @@ def render_customer_care():
     render_customer_care_inventory_view()
 
     st.markdown("### Recent Orders")
-    table(load_orders().tail(25).iloc[::-1], ["order_id","product_type","customer_name","order_type","urgency_level","order_quantity","is_bulk_order",
+    recent_orders = load_orders().tail(25).iloc[::-1].copy()
+    if not recent_orders.empty and "flavours" in recent_orders.columns:
+        recent_orders["flavour_combination"] = recent_orders["flavours"].apply(
+            lambda f: f"({f})" if f and str(f).strip() and str(f) != "nan" else "—")
+    table(recent_orders, ["order_id","product_type","customer_name","order_type","urgency_level","flavour_combination","order_quantity","is_bulk_order",
           "payment_arrangement","due_date","expected_time","delivery_window_start","delivery_window_end",
           "cake_size_value","cake_shape","cake_format","system_suggested_layers","final_approved_layers","balance","workflow_status","current_owner"])
 
@@ -2466,10 +2605,11 @@ def render_production_planning():
     active_batches = load_table("baking_batches")
     active_batches = active_batches[active_batches["status"] != "Complete"] if not active_batches.empty else active_batches
     if not active_batches.empty:
-        st.markdown("#### Active Batches")
-        table(active_batches.sort_values("created_at", ascending=False),
-              ["batch_number", "batch_date", "flavour", "cake_size_value", "cake_shape", "total_layers_requested",
-               "assigned_baker", "status", "created_at"])
+        st.markdown("#### Active Batches — Grouped by Day")
+        st.caption("What bakers will see: date, batch number, and the exact flavour/size/layer breakdown — no customer names.")
+        table(active_batches.sort_values(["batch_date", "flavour", "cake_size_value"]),
+              ["batch_date", "batch_number", "flavour", "cake_size_value", "cake_shape", "total_layers_requested",
+               "assigned_baker", "status"])
     st.divider()
 
     st.markdown("## 🎂 Individual Orders (exceptions, urgent, or non-cake items)")
@@ -2526,6 +2666,7 @@ def render_production_planning():
             oven_person = st.multiselect("Oven Person(s)", bakers, format_func=first_name, key="pp_oven_multi")
             st.info(f"{PRODUCT_BADGE.get(ptype, ('',''))[0]} order — goes straight from Baking to Packaging, so only baking roles are needed here.")
             piler, coverer, decorator = "N/A", "N/A", "N/A"
+            centerpiece_team, side_cake_team = [], []
             topper_owner = "N/A"
         else:
             a, b = st.columns(2)
@@ -2536,6 +2677,12 @@ def render_production_planning():
             piler = st.multiselect("Piler(s)", pilers, format_func=first_name, key="pp_piler_multi")
             coverer = st.multiselect("Coverer(s)", coverers, format_func=first_name, key="pp_coverer_multi")
             decorator = st.multiselect("Decorator(s)", decorators, format_func=first_name, key="pp_decorator_multi")
+            centerpiece_team, side_cake_team = [], []
+            if str(row.get("is_multi_tier")) == "Yes":
+                st.markdown("### 💍 Wedding Cake Team Split")
+                st.caption("Assign a separate team to the centerpiece versus the side cakes — 2 or 3 people on each is fine.")
+                centerpiece_team = st.multiselect("Centerpiece Team (2-3 people)", decorators, format_func=first_name, key="pp_centerpiece_team")
+                side_cake_team = st.multiselect("Side Cake Team (2-3 people)", decorators, format_func=first_name, key="pp_side_cake_team")
             topper_owner = "Keith"
             if str(row.get("topper_required")) == "Yes":
                 st.markdown("### 🎨 Design & Innovation / Topper Assignment")
@@ -2551,9 +2698,12 @@ def render_production_planning():
             decorator_val = ", ".join(decorator) if isinstance(decorator, list) else decorator
             mixer_val = ", ".join(mixer) if isinstance(mixer, list) else mixer
             oven_val = ", ".join(oven_person) if isinstance(oven_person, list) else oven_person
+            centerpiece_val = ", ".join(centerpiece_team) if isinstance(centerpiece_team, list) else centerpiece_team
+            side_cake_val = ", ".join(side_cake_team) if isinstance(side_cake_team, list) else side_cake_team
             update_order(row.order_id, {
                 "baker_assigned":baker, "mixer_assigned":mixer_val, "oven_person_assigned":oven_val,
                 "piler_assigned":piler_val, "coverer_assigned":coverer_val, "decorator_assigned":decorator_val,
+                "centerpiece_team_assigned":centerpiece_val, "side_cake_team_assigned":side_cake_val,
                 "workflow_status":"Production Planned", "current_owner":"Baking", "next_action":"Start baking",
                 "production_planned_at":now_iso(), "baking_status":"Not Started", "decoration_status":"Not Started",
             }, by, "Production Team Assigned", "Production Planning")
@@ -2916,8 +3066,8 @@ def render_baking():
         if pending_batches.empty:
             st.info("No batches assigned to you right now.")
         else:
-            table(pending_batches.sort_values("created_at", ascending=False),
-                  ["batch_number", "batch_date", "flavour", "cake_size_value", "cake_shape",
+            table(pending_batches.sort_values(["batch_date", "flavour", "cake_size_value"]),
+                  ["batch_date", "batch_number", "flavour", "cake_size_value", "cake_shape",
                    "total_layers_requested", "assigned_baker", "mixer_assigned", "oven_person_assigned", "status"])
             pick_batch = st.selectbox("Select a batch to work on", pending_batches["batch_number"].tolist(), key="batch_board_pick")
             brow = pending_batches[pending_batches["batch_number"] == pick_batch].iloc[0]
@@ -2986,7 +3136,7 @@ def render_piling():
     t1,t2,t3,t4 = st.tabs(["Incoming from Baking", "In Progress", "Correction Required", "End-of-Day Layer Reconciliation"])
     with t1:
         incoming_q = filter_orders(df,["Piling Incoming"])
-        render_queue_table(incoming_q, "Cakes Incoming From Baking", ["piler_assigned", "baking_batch_number"])
+        render_queue_table(incoming_q, "Cakes Incoming From Baking", ["piler_assigned", "baking_batch_number", "decorator_assigned", "icing_type"])
         row = select_order(incoming_q, "pile_in")
         if row is not None:
             order_card(row, [("Baker", row.get("baker_assigned")), ("Piler", row.get("piler_assigned")), ("🧮 Batch Number", row.get("baking_batch_number"))])
@@ -3017,7 +3167,7 @@ def render_piling():
                     issue_form("pile_in", "Baking", "Piling", "Baking Correction Required", "Baking", row, row.get("baker_assigned"))
     with t2:
         prog_q = filter_orders(df,["Piling"])
-        render_queue_table(prog_q, "Cakes Currently Being Piled", ["piler_assigned"])
+        render_queue_table(prog_q, "Cakes Currently Being Piled", ["piler_assigned", "decorator_assigned", "icing_type"])
         row = select_order(prog_q, "pile_prog")
         if row is not None:
             order_card(row)
@@ -3083,7 +3233,7 @@ def render_covering():
     t1,t2,t3 = st.tabs(["Incoming from Piling", "In Progress", "Correction Required"])
     with t1:
         incoming_q = filter_orders(df,["Covering Incoming"])
-        render_queue_table(incoming_q, "Cakes Incoming From Piling", ["coverer_assigned"])
+        render_queue_table(incoming_q, "Cakes Incoming From Piling", ["coverer_assigned", "decorator_assigned", "icing_type"])
         row = select_order(incoming_q, "cov_in")
         if row is not None:
             order_card(row, [("Piler", row.get("piler_assigned")), ("Coverer", row.get("coverer_assigned"))])
@@ -3104,7 +3254,7 @@ def render_covering():
                     issue_form("cov_in", "Piling", "Covering", "Piling Correction Required", "Filling / Piling", row, row.get("piler_assigned"))
     with t2:
         prog_q = filter_orders(df,["Covering"])
-        render_queue_table(prog_q, "Cakes Currently Being Covered", ["coverer_assigned"])
+        render_queue_table(prog_q, "Cakes Currently Being Covered", ["coverer_assigned", "decorator_assigned", "icing_type"])
         row = select_order(prog_q, "cov_prog")
         if row is not None:
             order_card(row)
@@ -3252,7 +3402,7 @@ def render_decoration():
                    "cake_shape", "decorator_assigned", "workflow_status", "urgency_level"])
     with t1:
         incoming_q = filter_orders(df,["Decorating Incoming"])
-        render_queue_table(incoming_q, "Cakes Incoming From Covering", ["decorator_assigned"])
+        render_queue_table(incoming_q, "Cakes Incoming From Covering", ["decorator_assigned", "icing_type"])
         row = select_order(incoming_q, "deco_in")
         if row is not None:
             order_card(row, [("Coverer", row.get("coverer_assigned")), ("Decorator", row.get("decorator_assigned"))])
@@ -3292,7 +3442,7 @@ def render_decoration():
             table(req[req["order_id"] == row.order_id] if not req.empty else req, ["item_name","quantity_required","unit","requirement_status","requested_by","requested_at"])
     with t3:
         prog_q = filter_orders(df,["Decorating"])
-        render_queue_table(prog_q, "Cakes Currently Being Decorated", ["decorator_assigned"])
+        render_queue_table(prog_q, "Cakes Currently Being Decorated", ["decorator_assigned", "icing_type"])
         row = select_order(prog_q, "deco_prog")
         if row is not None:
             order_card(row, [("Icing Type", row.get("icing_type"))])
@@ -3391,7 +3541,9 @@ def render_procurement():
         st.info("No material requirements submitted yet.")
         return
     table(req, ["id","order_id","item_name","quantity_required","unit","requirement_status","requested_by","requested_at"])
-    rid = st.number_input("Requirement ID", min_value=1, step=1)
+    req_options = [f"#{r.id} — {r.item_name} ({r.quantity_required:g} {r.unit}) for {r.order_id}" for r in req.itertuples()]
+    req_pick = st.selectbox("Select a requirement (search by typing item name, order ID, or number)", req_options, key="proc_req_pick")
+    rid = int(req_pick.split(" — ")[0].lstrip("#"))
     status = st.selectbox("Procurement action", ["Issued", "Partially Issued", "Out of Stock", "Requisition Required"])
     issued_qty = st.number_input("Quantity issued", min_value=0.0, step=1.0)
     by = st.text_input("Updated by", value="Procurement")
@@ -3515,7 +3667,7 @@ def render_dispatch(show_header=True):
     df = load_orders()
     _,_,_,_,drivers = staff_lists()
     ready = filter_orders(df,["Ready for Dispatch"])
-    render_queue_table(ready, "Cakes Ready For Dispatch", ["delivery_window_start","delivery_window_end"])
+    render_queue_table(ready, "Cakes Ready For Dispatch", ["delivery_date", "delivery_window_start","delivery_window_end"])
     if ready.empty:
         st.info("No cakes ready for dispatch.")
     else:
