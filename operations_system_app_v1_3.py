@@ -2368,6 +2368,8 @@ def render_customer_care():
                                 reserved_order_id=? WHERE id=?""", (int(order_quantity), order_id, int(inventory_batch_id)))
                 conn.execute("UPDATE baked_cookie_inventory SET inventory_status='Reserved' WHERE id=? AND quantity_available<=0", (int(inventory_batch_id),))
                 conn.commit()
+        create_notification(order_id, "Finance", None,
+                             f"💰 New order {order_id} ({customer_name.strip()}) needs {next_action.lower()}.")
         st.success(f"Order {order_id} created ({order_quantity} unit(s), total UGX {total_price:,.0f}) and sent to Finance."
                    + (" Fulfilled from cookie inventory." if sold_from_inventory == "Yes" else ""))
         for k in ("nc_is_bulk", "nc_qty", "nc_price"):
@@ -2420,6 +2422,8 @@ def render_finance():
                         "next_action":"Pack and print delivery note (from cookie inventory)", "payment_status":"Confirmed",
                         "finance_confirmation_status":"Confirmed" if float(row.get("balance") or 0) == 0 else "Pending"
                     }, by, "Order Payment Confirmed — Fulfilled From Inventory", "Finance")
+                    create_notification(row.order_id, "Packaging", None,
+                                         f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — payment confirmed, ready to package from inventory.")
                     st.success("Payment confirmed — already baked, sent straight to Packaging.")
                 else:
                     update_order(row.order_id, {
@@ -2427,6 +2431,8 @@ def render_finance():
                         "next_action":"Plan production / check baked inventory", "payment_status":"Confirmed",
                         "finance_confirmation_status":"Confirmed" if float(row.get("balance") or 0) == 0 else "Pending"
                     }, by, "Order Payment Confirmed", "Finance")
+                    create_notification(row.order_id, "Production Planning", None,
+                                         f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — payment confirmed, ready to plan production.")
                     st.success("Payment confirmed.")
                 st.rerun()
 
@@ -2442,17 +2448,23 @@ def render_finance():
                         "workflow_status":"Ready for Packaging", "current_owner":"Packaging",
                         "next_action":"Pack and print delivery note (from cookie inventory)", "payment_status":"Approved for Pay on Delivery"
                     }, by, "No Deposit Order Approved — Fulfilled From Inventory", "Finance")
+                    create_notification(row.order_id, "Packaging", None,
+                                         f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — approved for pay-on-delivery, ready to package from inventory.")
                     st.success("Approved — already baked, sent straight to Packaging.")
                 else:
                     update_order(row.order_id, {
                         "workflow_status":"Deposit Confirmed", "current_owner":"Production Planning",
                         "next_action":"Plan production / check baked inventory", "payment_status":"Approved for Pay on Delivery"
                     }, by, "No Deposit Order Approved", "Finance")
+                    create_notification(row.order_id, "Production Planning", None,
+                                         f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — approved for pay-on-delivery, ready to plan production.")
                     st.success("Approved and released to Production Planning.")
                 st.rerun()
             if b.button("❌ Hold Order", width='stretch'):
                 update_order(row.order_id, {"workflow_status":"Payment Hold","current_owner":"Customer Care","next_action":"Review payment arrangement"},
                              by, "No Deposit Order Held", "Finance")
+                create_notification(row.order_id, "Customer Care", None,
+                                     f"⚠️ {row.order_id} ({disp(row.get('customer_name'))}) — payment on hold, needs review.")
                 st.warning("Order held for Customer Care review."); st.rerun()
 
     with t3:
@@ -2795,6 +2807,8 @@ def render_production_planning():
                         "current_owner":"Filling / Piling", "next_action":"Piler to accept reserved baked cake",
                         "piler_assigned": piler_val, "coverer_assigned": coverer_val, "decorator_assigned": decorator_val,
                     }, by_inv, "Baked Inventory Reserved — Baking Skipped, Team Pre-Assigned", "Production Planning")
+                    create_notification(row.order_id, "Filling / Piling", piler_val,
+                                         f"🚨 {row.order_id} ({disp(row.get('customer_name'))}) — urgent, baking skipped, ready to pile now.")
                     st.success(f"Inventory reserved and team pre-assigned "
                                f"(Piler: {piler_val or 'none yet'}, Coverer: {coverer_val or 'none yet'}, Decorator: {decorator_val or 'none yet'}). "
                                f"Cake sent to Piling.")
@@ -2854,6 +2868,21 @@ def render_production_planning():
                 "workflow_status":"Production Planned", "current_owner":"Baking", "next_action":"Start baking",
                 "production_planned_at":now_iso(), "baking_status":"Not Started", "decoration_status":"Not Started",
             }, by, "Production Team Assigned", "Production Planning")
+            create_notification(row.order_id, "Baking", baker,
+                                 f"🎂 {row.order_id} ({disp(row.get('customer_name'))}) has been assigned to you for baking.")
+            due_str = disp(row.get("due_date"))
+            if piler_val:
+                create_notification(row.order_id, "Filling / Piling", piler_val,
+                                     f"📅 Heads up — {row.order_id} ({disp(row.get('customer_name'))}) is coming your way for piling. "
+                                     f"Currently at Baking, due {due_str}. Check '📅 Incoming Workload' for the full picture.")
+            if coverer_val:
+                create_notification(row.order_id, "Coating / Covering", coverer_val,
+                                     f"📅 Heads up — {row.order_id} ({disp(row.get('customer_name'))}) is coming your way for covering. "
+                                     f"Currently at Baking, due {due_str}. Check '📅 Incoming Workload' for the full picture.")
+            if decorator_val:
+                create_notification(row.order_id, "Decoration", decorator_val,
+                                     f"📅 Heads up — {row.order_id} ({disp(row.get('customer_name'))}) is coming your way for decoration. "
+                                     f"Currently at Baking, due {due_str}. Check '📅 Incoming Workload' for the full picture.")
             if str(row.get("topper_required")) == "Yes":
                 target = topper_target_datetime(row)
                 update_order(row.order_id, {
@@ -3059,6 +3088,8 @@ def render_baking():
                 else:
                     insert_stage_check(row.order_id,"Baking","Piling",by,"Passed")
                     update_order(row.order_id, {"workflow_status":"Piling Incoming", "current_owner":"Filling / Piling", "next_action":"Piler to accept cake", "baking_completed_at":stopped_at, "baking_status":"Complete"}, by, "Baking Passed", "Baking")
+                    create_notification(row.order_id, "Filling / Piling", row.get("piler_assigned"),
+                                         f"🎂 {row.order_id} ({disp(row.get('customer_name'))}) has finished baking and is ready to pile.")
                 st.rerun()
             with b:
                 issue_form("bake", "Baking", "Baking Check", "Baking Correction Required", "Baking", row, row.get("baker_assigned"))
@@ -3247,6 +3278,9 @@ def render_baking():
                                                   next_action=? WHERE order_id=?""",
                                                  (f"Piler to pick from batch {brow['batch_number']}", lrow["order_id"]))
                                     conn.commit()
+                                    piler_for_notif = conn.execute("SELECT piler_assigned, customer_name FROM orders WHERE order_id=?", (lrow["order_id"],)).fetchone()
+                                    create_notification(lrow["order_id"], "Filling / Piling", piler_for_notif[0] if piler_for_notif else None,
+                                                         f"🎂 {lrow['order_id']} ({disp(piler_for_notif[1]) if piler_for_notif else ''}) baked (batch {brow['batch_number']}) and ready to pile.")
                                     st.success(f"{lrow['order_id']} baked and sent straight to Piling.")
                                 else:
                                     st.info(f"{lrow['order_id']} baked in this batch — still waiting on another flavour batch before it can move to Piling.")
@@ -3323,6 +3357,8 @@ def render_piling():
             by = st.text_input("Updated by", value=disp(row.get("piler_assigned")), key="pile_by2")
             if st.button("✅ Piling Complete → Send to Covering Check", width='stretch', disabled=(not may_act or not piling_materials_ready)):
                 update_order(row.order_id, {"workflow_status":"Covering Incoming", "current_owner":"Coating / Covering", "next_action":"Coverer to check piling and accept"}, by, "Piling Submitted", "Piling")
+                create_notification(row.order_id, "Coating / Covering", row.get("coverer_assigned"),
+                                     f"🎂 {row.order_id} ({disp(row.get('customer_name'))}) has finished piling and is ready to cover.")
                 st.rerun()
     with t3:
         row = select_order(filter_orders(df,["Piling Correction Required"]), "pile_corr")
@@ -3636,6 +3672,8 @@ def render_decoration():
             by = st.text_input("Updated by", value=disp(row.get("decorator_assigned")), key="deco_by3")
             if st.button("✅ Decoration Complete → Send to Studio / Final QC", width='stretch', disabled=not can_finish):
                 update_order(row.order_id, {"workflow_status":"Studio Check", "current_owner":"Studio / Final QC", "next_action":"Final quality check", "decorating_completed_at":now_iso(), "decoration_status":"Complete"}, by, "Decoration Submitted", "Decoration")
+                create_notification(row.order_id, "Studio / Final QC", None,
+                                     f"🎂 {row.order_id} ({disp(row.get('customer_name'))}) has finished decoration and is ready for final QC.")
                 st.rerun()
     with t4:
         row = select_order(filter_orders(df,["Decoration Correction Required"]), "deco_corr")
@@ -3667,6 +3705,8 @@ def render_studio_qc():
             if a.button("✅ Final QC Passed → Ready for Packaging", width='stretch'):
                 insert_stage_check(row.order_id,"Decoration","Studio / Final QC",by,"Passed")
                 update_order(row.order_id, {"workflow_status":"Ready for Packaging", "current_owner":"Studio / Final QC", "next_action":"Package and print delivery note", "qc_status":"Approved", "qc_completed_at":now_iso()}, by, "Final QC Passed", "Studio")
+                create_notification(row.order_id, "Studio / Final QC", None,
+                                     f"🎂 {row.order_id} ({disp(row.get('customer_name'))}) passed final QC and is ready to package.")
                 st.rerun()
             with b:
                 issue_form("studio", "Decoration", "Studio / Final QC", "Decoration Correction Required", "Decoration", row, row.get("decorator_assigned"))
@@ -3801,6 +3841,8 @@ def render_packaging(show_header=True):
             by = st.text_input("Updated by", value="Packaging", key="pack_by2")
             if st.button("✅ Packaging Complete → Ready for Dispatch", width='stretch', disabled=not packaging_materials_ready):
                 update_order(row.order_id, {"workflow_status":"Ready for Dispatch", "current_owner":"Dispatch", "next_action":"Assign to delivery run", "packaging_status":"Complete", "packaging_completed_at":now_iso()}, by, "Packaging Complete", "Packaging")
+                create_notification(row.order_id, "Dispatch / Driver", None,
+                                     f"📦 {row.order_id} ({disp(row.get('customer_name'))}) is packaged and ready for a delivery run.")
                 st.rerun()
     with t3:
         row = select_order(df, "pack_note", "Select any order for delivery note")
@@ -3841,6 +3883,8 @@ def render_dispatch(show_header=True):
                     conn.execute("INSERT INTO delivery_run_orders(run_id, order_id, stop_sequence, delivery_status) VALUES(?,?,?,?)", (run_id, oid, stop, "Planned"))
                     conn.execute("UPDATE orders SET workflow_status=?, current_owner=?, next_action=?, driver_assigned=?, last_updated_at=?, last_updated_by=? WHERE order_id=?", ("Delivery Run Assigned", "Driver", "Start delivery run", driver, now_iso(), by, oid))
                     conn.execute("INSERT INTO audit_logs(order_id, action_type, stage, action_details, performed_by, performed_at) VALUES(?,?,?,?,?,?)", (oid, "Assigned to Delivery Run", "Dispatch", run_id, by, now_iso()))
+                    create_notification(oid, "Dispatch / Driver", driver,
+                                         f"🚚 {oid} assigned to you for delivery run {run_id}.")
                 conn.commit()
             refresh_data(); st.success(f"Delivery run {run_id} created."); st.rerun()
     st.markdown("### Delivery Runs")
