@@ -415,104 +415,195 @@ def render_staff_greeting():
     )
 
 
-def render_department_notifications():
-    """Shows unread notifications for whichever department is currently logged in —
-    including complaint/accountability notices raised against them. Checks ALL of a
-    person's departments for the tab-title/popup count (not just whichever one is
-    currently active) — someone with multiple departments should still be alerted to
-    new work in a department they aren't currently looking at. Also offers a genuine
-    desktop-notification opt-in button — modern browsers require an actual click to
-    grant that permission, so this can't be requested automatically on page load."""
+def _notification_rows_for_user(notes, departments, staff_name):
+    """Return unread notifications visible to this login.
+
+    Department-wide notices have a blank target_person. Personal notices are only
+    shown to the matching employee. Matching is case-insensitive and also accepts
+    the first name because Cake Album staff accounts commonly use one name.
+    """
+    if notes.empty:
+        return notes
+
+    unread = notes[notes["notification_status"].fillna("").str.casefold() == "unread"].copy()
+    unread = unread[unread["target_department"].isin(departments)]
+    if unread.empty:
+        return unread
+
+    login = str(staff_name or "").strip().casefold()
+    login_first = login.split()[0] if login else ""
+
+    def visible_to_login(target):
+        target = str(target or "").strip().casefold()
+        if not target or target in {"none", "nan", "—"}:
+            return True  # department-wide notification
+        if not login:
+            return False
+        target_first = target.split()[0]
+        return target == login or (login_first and target_first == login_first)
+
+    return unread[unread["target_person"].apply(visible_to_login)]
+
+
+def _render_department_notifications_body():
+    """Render in-app and operating-system notifications for the logged-in employee."""
     dept = st.session_state.get("department")
     if not dept:
         return
+
     all_my_depts = st.session_state.get("departments") or [dept]
-    notes = load_table("notifications")
-    mine = notes[(notes["target_department"] == dept) & (notes["notification_status"] == "Unread")] if not notes.empty else notes
-    mine_all_depts = notes[(notes["target_department"].isin(all_my_depts)) & (notes["notification_status"] == "Unread")] if not notes.empty else notes
     staff_name = st.session_state.get("staff_name", "").strip()
+    notes = load_table("notifications")
+    mine_all_depts = _notification_rows_for_user(notes, all_my_depts, staff_name)
+    mine = mine_all_depts[mine_all_depts["target_department"] == dept] if not mine_all_depts.empty else mine_all_depts
 
-    seen_key = "_notif_seen_ids_ALL"
-    seen_ids = st.session_state.get(seen_key, set())
-    current_ids = set(mine_all_depts["id"].tolist()) if not mine_all_depts.empty else set()
-    new_ids = current_ids - seen_ids
-    is_first_check = "_notif_ever_checked" not in st.session_state
-    new_messages = (mine_all_depts[mine_all_depts["id"].isin(new_ids)]["message"].tolist() if new_ids else []) if not is_first_check else []
-    st.session_state[seen_key] = current_ids
-    st.session_state["_notif_ever_checked"] = True
+    # The browser keeps the IDs it has already announced. This survives Streamlit
+    # reruns and prevents the same unread job from popping up every polling cycle.
+    payload = []
+    if not mine_all_depts.empty:
+        for _, n in mine_all_depts.sort_values("created_at").iterrows():
+            payload.append({
+                "id": str(n.get("id")),
+                "message": str(n.get("message", "New work has been assigned.")),
+                "order_id": str(n.get("order_id", "") or ""),
+            })
 
-    unread_count = len(current_ids)
-    import json as _json
-    msgs_json = _json.dumps(new_messages[:5])
-    st.components.v1.html(f"""
-    <div id="notif-widget" style="font-family:sans-serif;">
-      <button id="notif-enable-btn" style="display:none;padding:6px 14px;border-radius:6px;border:1px solid #4B2A5C;
-        background:#F0E6F5;color:#1A1420;cursor:pointer;font-size:0.85rem;">
-        🔔 Enable Desktop Notifications
+    unread_count = len(mine_all_depts)
+    payload_json = json.dumps(payload).replace("</", "<\\/")
+
+    notification_html = f"""
+    <div id="ca-notification-controls" style="font-family:sans-serif;margin:0.15rem 0 0.5rem 0;">
+      <button id="ca-enable-notifications" style="display:none;padding:7px 14px;border-radius:7px;
+        border:1px solid #4B2A5C;background:#F0E6F5;color:#1A1420;cursor:pointer;font-size:0.85rem;">
+        🔔 Enable desktop notifications
       </button>
-      <span id="notif-enabled-msg" style="display:none;color:#1A1420;font-size:0.85rem;">✅ Desktop notifications enabled</span>
-      <span id="notif-blocked-msg" style="display:none;color:#8C1D1D;font-size:0.85rem;">
-        🔕 Notifications blocked in this browser — click the padlock/site-info icon next to the address bar to allow them.
+      <button id="ca-test-notification" style="display:none;margin-left:6px;padding:7px 14px;border-radius:7px;
+        border:1px solid #4B2A5C;background:white;color:#1A1420;cursor:pointer;font-size:0.85rem;">
+        Send test notification
+      </button>
+      <span id="ca-notifications-blocked" style="display:none;color:#8C1D1D;font-size:0.85rem;">
+        🔕 Notifications are blocked. Open the site-info/padlock icon and change Notifications to Allow.
+      </span>
+      <span id="ca-notifications-unsupported" style="display:none;color:#8C1D1D;font-size:0.85rem;">
+        This browser does not support desktop notifications.
       </span>
     </div>
     <script>
-    (function() {{
-        // Reliable part: tab title shows the unread count, resetting to normal at zero.
-        // This needs no special browser permission (same-origin access to the parent tab).
-        try {{
-            var base = "Cake Album Operations";
-            window.parent.document.title = {unread_count} > 0 ? ("🔔 (" + {unread_count} + ") " + base) : base;
-        }} catch (e) {{}}
+    (() => {{
+      const notifications = {payload_json};
+      const unreadCount = {unread_count};
+      const enableButton = document.getElementById("ca-enable-notifications");
+      const testButton = document.getElementById("ca-test-notification");
+      const blocked = document.getElementById("ca-notifications-blocked");
+      const unsupported = document.getElementById("ca-notifications-unsupported");
+      const storageKey = "cake_album_announced_notification_ids_v2";
 
-        var btn = document.getElementById("notif-enable-btn");
-        var enabledMsg = document.getElementById("notif-enabled-msg");
-        var blockedMsg = document.getElementById("notif-blocked-msg");
+      document.title = unreadCount > 0
+        ? `🔔 (${{unreadCount}}) Cake Album Operations`
+        : "Cake Album Operations";
 
-        function refreshButtonState() {{
-            if (!("Notification" in window)) return;
-            if (Notification.permission === "granted") {{
-                btn.style.display = "none"; enabledMsg.style.display = "inline"; blockedMsg.style.display = "none";
-            }} else if (Notification.permission === "denied") {{
-                btn.style.display = "none"; enabledMsg.style.display = "none"; blockedMsg.style.display = "inline";
-            }} else {{
-                btn.style.display = "inline-block"; enabledMsg.style.display = "none"; blockedMsg.style.display = "none";
-            }}
-        }}
-        refreshButtonState();
-
-        // Real user click — this is what browsers actually require to grant the permission.
-        // An automatic request on page load (no click involved) gets silently blocked by
-        // most modern browsers as an anti-abuse measure, which is why this needs a button.
-        btn.addEventListener("click", function() {{
-            Notification.requestPermission().then(function(p) {{ refreshButtonState(); }});
+      function showNotification(item, isTest=false) {{
+        const title = isTest ? "Cake Album — Test successful" : "Cake Album — New job assigned";
+        const body = isTest ? "Desktop notifications are working on this computer." : item.message;
+        const n = new Notification(title, {{
+          body,
+          tag: isTest ? "cake-album-test" : `cake-album-${{item.id}}`,
+          renotify: !isTest,
+          requireInteraction: false
         }});
+        n.onclick = () => {{ window.focus(); n.close(); }};
+      }}
 
-        // Fire real popups for anything new — this does NOT need a fresh click, since the
-        // permission was already granted earlier; only the original grant needed a click.
-        if ({msgs_json}.length > 0 && ("Notification" in window) && Notification.permission === "granted") {{
-            {msgs_json}.forEach(function(m) {{
-                try {{ new Notification("Cake Album — New Update", {{ body: m }}); }} catch (e) {{}}
-            }});
+      function readSeen() {{
+        try {{ return new Set(JSON.parse(localStorage.getItem(storageKey) || "[]")); }}
+        catch (_) {{ return new Set(); }}
+      }}
+
+      function announceNew() {{
+        if (!("Notification" in window) || Notification.permission !== "granted") return;
+        const seen = readSeen();
+        let changed = false;
+        notifications.forEach(item => {{
+          if (!seen.has(item.id)) {{
+            showNotification(item);
+            seen.add(item.id);
+            changed = true;
+          }}
+        }});
+        if (changed) localStorage.setItem(storageKey, JSON.stringify([...seen].slice(-500)));
+      }}
+
+      function refreshControls() {{
+        enableButton.style.display = "none";
+        testButton.style.display = "none";
+        blocked.style.display = "none";
+        unsupported.style.display = "none";
+        if (!("Notification" in window)) {{ unsupported.style.display = "inline"; return; }}
+        if (!window.isSecureContext) {{
+          blocked.textContent = "🔕 Desktop notifications require HTTPS (or localhost).";
+          blocked.style.display = "inline";
+          return;
         }}
+        if (Notification.permission === "default") enableButton.style.display = "inline-block";
+        if (Notification.permission === "granted") testButton.style.display = "inline-block";
+        if (Notification.permission === "denied") blocked.style.display = "inline";
+      }}
+
+      enableButton.addEventListener("click", async () => {{
+        const permission = await Notification.requestPermission();
+        refreshControls();
+        if (permission === "granted") {{
+          showNotification({{}}, true);
+          announceNew();
+        }}
+      }});
+      testButton.addEventListener("click", () => showNotification({{}}, true));
+
+      refreshControls();
+      announceNew();
     }})();
     </script>
-    """, height=40)
+    """
+
+    # st.components.v1.html is an iframe. Chrome and Firefox reject notification
+    # permission requests from cross-origin iframes. st.html executes in the top-level
+    # app document, which is the required context for the Notifications API.
+    if hasattr(st, "html"):
+        try:
+            st.html(notification_html, unsafe_allow_javascript=True)
+        except TypeError:
+            st.info("Desktop notifications require a newer Streamlit version. Update Streamlit, then restart the app.")
+    else:
+        st.info("Desktop notifications require a newer Streamlit version. Update Streamlit, then restart the app.")
 
     if mine.empty:
         return
+
     st.markdown("### 🔔 Notifications")
     for _, n in mine.sort_values("created_at", ascending=False).iterrows():
         person = disp(n.get("target_person"))
         is_complaint = str(n.get("message", "")).startswith("Complaint ")
         icon = "🚨" if is_complaint else "🔔"
         st.warning(f"{icon} {n['message']}" + (f" (For: {person})" if person != "—" else ""))
+
     ack_by = st.text_input("Acknowledged by", value=staff_name or dept, key=f"notif_ack_{dept}")
     if st.button("Mark all as read", key=f"notif_read_{dept}"):
         with connect() as conn:
             for nid in mine["id"].tolist():
-                conn.execute("UPDATE notifications SET notification_status='Read', read_at=?, acknowledged_by=? WHERE id=?", (now_iso(), ack_by, nid))
+                conn.execute(
+                    "UPDATE notifications SET notification_status='Read', read_at=?, acknowledged_by=? WHERE id=?",
+                    (now_iso(), ack_by, nid),
+                )
             conn.commit()
         st.rerun()
+
+
+# Poll only this notification area instead of refreshing the whole ERP page and
+# interrupting forms. On older Streamlit versions, it still works on normal reruns.
+if hasattr(st, "fragment"):
+    render_department_notifications = st.fragment(run_every="10s")(_render_department_notifications_body)
+else:
+    render_department_notifications = _render_department_notifications_body
 
 
 # -----------------------------
