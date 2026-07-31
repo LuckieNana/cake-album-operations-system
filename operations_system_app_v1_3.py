@@ -1570,6 +1570,8 @@ def order_card(row, extra=None, show_image=True):
                 st.markdown("**🎂 Tier Breakdown**")
                 tier_df = pd.DataFrame(tiers)
                 tier_df.columns = [c.title() for c in tier_df.columns]
+                if not show_image and "Price" in tier_df.columns:
+                    tier_df = tier_df.drop(columns=["Price"])
                 st.dataframe(tier_df, hide_index=True, width='stretch')
         except Exception:
             pass
@@ -1580,12 +1582,13 @@ def order_card(row, extra=None, show_image=True):
                 st.markdown("**🍰 Side Cake Breakdown**")
                 side_df = pd.DataFrame(side_cakes)
                 side_df.columns = [c.replace("_", " ").title() for c in side_df.columns]
+                if not show_image and "Price" in side_df.columns:
+                    side_df = side_df.drop(columns=["Price"])
                 st.dataframe(side_df, hide_index=True, width='stretch')
         except Exception:
             pass
 
     if not show_image:
-        st.caption("📷 Reference image hidden here — bakers work from flavour and size, not the design. See it in Piling onward if needed.")
         return
 
     images_shown = False
