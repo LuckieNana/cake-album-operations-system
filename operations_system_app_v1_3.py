@@ -417,25 +417,29 @@ def render_staff_greeting():
 
 def render_department_notifications():
     """Shows unread notifications for whichever department is currently logged in —
-    including complaint/accountability notices raised against them. Also updates the
-    browser tab title with the unread count (always reliable), and offers a genuine
+    including complaint/accountability notices raised against them. Checks ALL of a
+    person's departments for the tab-title/popup count (not just whichever one is
+    currently active) — someone with multiple departments should still be alerted to
+    new work in a department they aren't currently looking at. Also offers a genuine
     desktop-notification opt-in button — modern browsers require an actual click to
     grant that permission, so this can't be requested automatically on page load."""
     dept = st.session_state.get("department")
     if not dept:
         return
+    all_my_depts = st.session_state.get("departments") or [dept]
     notes = load_table("notifications")
     mine = notes[(notes["target_department"] == dept) & (notes["notification_status"] == "Unread")] if not notes.empty else notes
+    mine_all_depts = notes[(notes["target_department"].isin(all_my_depts)) & (notes["notification_status"] == "Unread")] if not notes.empty else notes
     staff_name = st.session_state.get("staff_name", "").strip()
 
-    seen_key = f"_notif_seen_ids_{dept}"
+    seen_key = "_notif_seen_ids_ALL"
     seen_ids = st.session_state.get(seen_key, set())
-    current_ids = set(mine["id"].tolist()) if not mine.empty else set()
+    current_ids = set(mine_all_depts["id"].tolist()) if not mine_all_depts.empty else set()
     new_ids = current_ids - seen_ids
-    is_first_check = not seen_ids and dept not in st.session_state.get("_notif_dept_checked", set())
-    new_messages = (mine[mine["id"].isin(new_ids)]["message"].tolist() if new_ids else []) if not is_first_check else []
+    is_first_check = "_notif_ever_checked" not in st.session_state
+    new_messages = (mine_all_depts[mine_all_depts["id"].isin(new_ids)]["message"].tolist() if new_ids else []) if not is_first_check else []
     st.session_state[seen_key] = current_ids
-    st.session_state.setdefault("_notif_dept_checked", set()).add(dept)
+    st.session_state["_notif_ever_checked"] = True
 
     unread_count = len(current_ids)
     import json as _json
