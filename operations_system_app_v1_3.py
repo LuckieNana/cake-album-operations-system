@@ -418,8 +418,9 @@ def render_staff_greeting():
 def render_department_notifications():
     """Shows unread notifications for whichever department is currently logged in —
     including complaint/accountability notices raised against them. Also updates the
-    browser tab title with the unread count, and makes a best-effort attempt at a real
-    desktop popup — see the caption below for the honest limits of that second part."""
+    browser tab title with the unread count (always reliable), and offers a genuine
+    desktop-notification opt-in button — modern browsers require an actual click to
+    grant that permission, so this can't be requested automatically on page load."""
     dept = st.session_state.get("department")
     if not dept:
         return
@@ -440,6 +441,16 @@ def render_department_notifications():
     import json as _json
     msgs_json = _json.dumps(new_messages[:5])
     st.components.v1.html(f"""
+    <div id="notif-widget" style="font-family:sans-serif;">
+      <button id="notif-enable-btn" style="display:none;padding:6px 14px;border-radius:6px;border:1px solid #4B2A5C;
+        background:#F0E6F5;color:#1A1420;cursor:pointer;font-size:0.85rem;">
+        🔔 Enable Desktop Notifications
+      </button>
+      <span id="notif-enabled-msg" style="display:none;color:#1A1420;font-size:0.85rem;">✅ Desktop notifications enabled</span>
+      <span id="notif-blocked-msg" style="display:none;color:#8C1D1D;font-size:0.85rem;">
+        🔕 Notifications blocked in this browser — click the padlock/site-info icon next to the address bar to allow them.
+      </span>
+    </div>
     <script>
     (function() {{
         // Reliable part: tab title shows the unread count, resetting to normal at zero.
@@ -449,26 +460,39 @@ def render_department_notifications():
             window.parent.document.title = {unread_count} > 0 ? ("🔔 (" + {unread_count} + ") " + base) : base;
         }} catch (e) {{}}
 
-        // Best-effort part: an actual desktop/OS popup via the Notification API. Works in many
-        // setups, but browsers increasingly restrict this inside the sandboxed frame Streamlit
-        // renders custom components in — treat this as a bonus, not a guarantee.
-        if ({msgs_json}.length > 0 && ("Notification" in window)) {{
-            function fire(msgs) {{
-                msgs.forEach(function(m) {{
-                    try {{ new Notification("Cake Album — New Update", {{ body: m }}); }} catch (e) {{}}
-                }});
-            }}
+        var btn = document.getElementById("notif-enable-btn");
+        var enabledMsg = document.getElementById("notif-enabled-msg");
+        var blockedMsg = document.getElementById("notif-blocked-msg");
+
+        function refreshButtonState() {{
+            if (!("Notification" in window)) return;
             if (Notification.permission === "granted") {{
-                fire({msgs_json});
-            }} else if (Notification.permission !== "denied") {{
-                Notification.requestPermission().then(function(p) {{
-                    if (p === "granted") fire({msgs_json});
-                }}).catch(function(e) {{}});
+                btn.style.display = "none"; enabledMsg.style.display = "inline"; blockedMsg.style.display = "none";
+            }} else if (Notification.permission === "denied") {{
+                btn.style.display = "none"; enabledMsg.style.display = "none"; blockedMsg.style.display = "inline";
+            }} else {{
+                btn.style.display = "inline-block"; enabledMsg.style.display = "none"; blockedMsg.style.display = "none";
             }}
+        }}
+        refreshButtonState();
+
+        // Real user click — this is what browsers actually require to grant the permission.
+        // An automatic request on page load (no click involved) gets silently blocked by
+        // most modern browsers as an anti-abuse measure, which is why this needs a button.
+        btn.addEventListener("click", function() {{
+            Notification.requestPermission().then(function(p) {{ refreshButtonState(); }});
+        }});
+
+        // Fire real popups for anything new — this does NOT need a fresh click, since the
+        // permission was already granted earlier; only the original grant needed a click.
+        if ({msgs_json}.length > 0 && ("Notification" in window) && Notification.permission === "granted") {{
+            {msgs_json}.forEach(function(m) {{
+                try {{ new Notification("Cake Album — New Update", {{ body: m }}); }} catch (e) {{}}
+            }});
         }}
     }})();
     </script>
-    """, height=0)
+    """, height=40)
 
     if mine.empty:
         return
