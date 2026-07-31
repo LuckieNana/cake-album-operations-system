@@ -751,7 +751,13 @@ def ensure_base_schema():
             status TEXT DEFAULT 'Pending', assigned_baker TEXT, mixer_assigned TEXT, oven_person_assigned TEXT,
             created_by TEXT, created_at TEXT, baking_started_at TEXT, completed_at TEXT)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS baking_batch_orders(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id INTEGER NOT NULL, order_id TEXT NOT NULL, layers_needed INTEGER)""")
+            id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id INTEGER NOT NULL, order_id TEXT NOT NULL, layers_needed INTEGER,
+            baked_status TEXT DEFAULT 'Pending', actual_layers_baked INTEGER, baked_at TEXT, baked_by TEXT)""")
+        existing_bbo = {r[1] for r in conn.execute("PRAGMA table_info(baking_batch_orders)").fetchall()}
+        for col_name, col_def in [("baked_status", "TEXT DEFAULT 'Pending'"), ("actual_layers_baked", "INTEGER"),
+                                    ("baked_at", "TEXT"), ("baked_by", "TEXT")]:
+            if col_name not in existing_bbo:
+                safe_add_column(conn, "baking_batch_orders", col_name, col_def)
         conn.execute("""CREATE TABLE IF NOT EXISTS order_videos(
             id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, filename TEXT, mime_type TEXT,
             data_base64 TEXT NOT NULL, file_size_bytes INTEGER, uploaded_at TEXT)""")
@@ -1395,7 +1401,16 @@ def load_table(table):
 # -----------------------------
 
 def generate_order_id():
-    return f"CA-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
+    date_str = datetime.now().strftime('%Y%m%d')
+    prefix = f"CA-{date_str}-"
+    with connect() as conn:
+        existing = conn.execute("SELECT order_id FROM orders WHERE order_id LIKE ?", (f"{prefix}%",)).fetchall()
+    max_num = 1999
+    for (oid,) in existing:
+        suffix = oid[len(prefix):]
+        if suffix.isdigit():  # only count new-format IDs; old timestamp+hex IDs are safely ignored
+            max_num = max(max_num, int(suffix))
+    return f"{prefix}{max_num + 1}"
 
 
 def fmt_ugx(v):
@@ -1472,7 +1487,7 @@ def select_order(df, key, label="Select an order"):
     return d[d["_label"] == choice].iloc[0]
 
 
-def order_card(row, extra=None):
+def order_card(row, extra=None, show_image=True):
     show_due_alert(row)
     ptype = row.get("product_type") or "Cake"
     is_short_pipeline = ptype in SHORT_PIPELINE_PRODUCTS
@@ -1518,6 +1533,10 @@ def order_card(row, extra=None):
     if ptype == "Cake":
         html.append(f"<b>Layers:</b> {disp(row.get('number_of_layers'))}<br>")
     html.append(f"<b>Design:</b> {disp(row.get('design_description'))}<br>")
+    if ptype == "Cake" and disp(row.get("icing_type")) != "—":
+        html.append(f"<b>🎂 Icing / Covering:</b> {disp(row.get('icing_type'))}<br>")
+    if disp(row.get("piler_assigned")) != "—":
+        html.append(f"<b>Piler:</b> {disp(row.get('piler_assigned'))}<br>")
     if disp(row.get("flavour_preference_note")) != "—":
         html.append(f"<b>🍰 Flavour Preference Note:</b> {disp(row.get('flavour_preference_note'))}<br>")
     if disp(row.get("centerpiece_team_assigned")) != "—" or disp(row.get("side_cake_team_assigned")) != "—":
@@ -1564,6 +1583,10 @@ def order_card(row, extra=None):
                 st.dataframe(side_df, hide_index=True, width='stretch')
         except Exception:
             pass
+
+    if not show_image:
+        st.caption("📷 Reference image hidden here — bakers work from flavour and size, not the design. See it in Piling onward if needed.")
+        return
 
     images_shown = False
     images_json = row.get("reference_images_json")
@@ -1613,13 +1636,13 @@ def table(df, columns):
     st.dataframe(staff_display_frame(df[cols]), hide_index=True, width='stretch')
 
 
-def render_queue_table(df_subset, title="Jobs In Queue", extra_columns=None):
+def render_queue_table(df_subset, title="Jobs In Queue", extra_columns=None, base_cols_override=None):
     """Show every job currently sitting at this stage, not just the one selected below,
     so staff can see the full workload instead of assuming there is only one job.
     Urgent orders are pinned to the top and clearly marked — Streamlit's tables can't
     show actual red cell backgrounds (they're canvas-rendered, not real HTML), so this
     is the reliable way to make urgency impossible to miss."""
-    base_cols = ["#", "🚨", "order_id", "product_type", "customer_name", "order_type", "urgency_level", "priority",
+    base_cols = base_cols_override or ["#", "🚨", "order_id", "product_type", "customer_name", "order_type", "urgency_level", "priority",
                  "due_date", "expected_time", "workflow_status"]
     cols = base_cols + (extra_columns or [])
     urgent_count = int((df_subset["urgency_level"] == "Urgent").sum()) if df_subset is not None and not df_subset.empty and "urgency_level" in df_subset.columns else 0
@@ -1637,6 +1660,8 @@ def render_queue_table(df_subset, title="Jobs In Queue", extra_columns=None):
     if "expected_time" in ordered.columns:
         sort_cols.append("expected_time"); sort_asc.append(True)
     ordered = ordered.sort_values(sort_cols, ascending=sort_asc)
+    if "flavour_combination" in cols and "flavours" in ordered.columns:
+        ordered["flavour_combination"] = ordered["flavours"].apply(lambda f: f"({f})" if f and str(f).strip() and str(f) != "nan" else "—")
     ordered.insert(0, "#", range(1, len(ordered) + 1))
     ordered.insert(1, "🚨", ordered["_is_urgent"].map(lambda u: "🚨 URGENT" if u else ""))
     table(ordered, cols)
@@ -2047,6 +2072,17 @@ def render_customer_care():
             total_price = price
     suggested = suggested_layers_for_price(price) if product_type == "Cake" else 0
 
+    st.markdown("### Due Date & Delivery")
+    a,b = st.columns(2)
+    due_date = a.date_input("Due Date (cake ready by)", help="When the cake itself needs to be finished — the baking/production timeline.", key="nc_due_date")
+    expected_time = b.time_input("Expected Time", value=dtime(12,0), key="nc_expected_time")
+    st.caption(f"📅 {due_date.strftime('%A')}" if due_date else "")
+
+    st.caption("The actual delivery day can be different from when the cake is finished — e.g. cake ready today, delivered tomorrow.")
+    a,b = st.columns(2)
+    delivery_date = a.date_input("Delivery Date", value=due_date, help="The day the cake actually goes out — may be the same as the due date, or later.", key="nc_delivery_date")
+    st.caption(f"📅 {delivery_date.strftime('%A')}" if delivery_date else "")
+
     with st.form("new_order_form", clear_on_submit=True):
         st.markdown("### Customer Details")
         a,b = st.columns(2)
@@ -2073,17 +2109,6 @@ def render_customer_care():
             topper_notes = st.text_area("Topper Style / Design Notes (leave blank if no topper)")
         else:
             topper_required, topper_wording, topper_notes = "No", "", ""
-
-        a,b = st.columns(2)
-        due_date = a.date_input("Due Date (cake ready by)", help="When the cake itself needs to be finished — the baking/production timeline.")
-        expected_time = b.time_input("Expected Time", value=dtime(12,0))
-        st.caption(f"📅 {due_date.strftime('%A')}" if due_date else "")
-
-        st.markdown("### Delivery")
-        st.caption("The actual delivery day can be different from when the cake is finished — e.g. cake ready today, delivered tomorrow.")
-        a,b = st.columns(2)
-        delivery_date = a.date_input("Delivery Date", value=due_date, help="The day the cake actually goes out — may be the same as the due date, or later.")
-        st.caption(f"📅 {delivery_date.strftime('%A')}" if delivery_date else "")
 
         st.markdown("### Delivery Window")
         st.caption("The time range the customer expects delivery within — used by Dispatch/Driver.")
@@ -2806,14 +2831,18 @@ def render_baking():
     page_header("🍰 Baking", "Bake layers, submit for baking check, and correct rejected cakes.")
     df = load_orders()
     render_hod_overview("Baking", df)
-    t1,t2,t3,t4,t5,t6,t7,t8 = st.tabs(["Assigned", "In Progress", "Correction Required", "Daily Baking Plan", "Baked Cake Inventory", "🍪 Baked Cookie Inventory", "🌡️ Oven Log", "🧮 Batch Board"])
-    with t1:
+    tab_batch, tab_assigned, tab_progress, tab_correction, tab_cakeinv, tab_cookieinv, tab_oven = st.tabs(
+        ["🧮 Batch Board", "Assigned", "In Progress", "Correction Required", "Baked Cake Inventory", "🍪 Baked Cookie Inventory", "🌡️ Oven Log"])
+    with tab_assigned:
         assigned_q = filter_orders(df,["Production Planned"])
         assigned_q = assigned_q[assigned_q["baking_batch_number"].isna() | (assigned_q["baking_batch_number"] == "")] if not assigned_q.empty and "baking_batch_number" in assigned_q.columns else assigned_q
-        render_queue_table(assigned_q, "Cakes Assigned To Baking", ["baker_assigned", "mixer_assigned", "oven_person_assigned"])
+        render_queue_table(assigned_q, "Cakes Assigned To Baking",
+                            extra_columns=["baker_assigned", "mixer_assigned", "oven_person_assigned"],
+                            base_cols_override=["#", "🚨", "order_id", "flavour_combination", "product_type", "order_type",
+                                                 "urgency_level", "due_date", "expected_time", "workflow_status"])
         row = select_order(assigned_q, "bake_assigned")
         if row is not None:
-            order_card(row, [("Baker (In Charge)", row.get("baker_assigned")), ("Mixer", row.get("mixer_assigned")), ("Oven", row.get("oven_person_assigned")), ("Format", row.get("cake_format"))])
+            order_card(row, [("Baker (In Charge)", row.get("baker_assigned")), ("Mixer", row.get("mixer_assigned")), ("Oven", row.get("oven_person_assigned")), ("Format", row.get("cake_format"))], show_image=False)
             st.markdown("### Materials Needed for This Bake")
             st.markdown(
                 "<div style='background:#FBEAEA;border:1px solid #E8B4B4;border-radius:8px;padding:10px 14px;"
@@ -2847,12 +2876,12 @@ def render_baking():
         else:
             table(pending_extra_here, ["id","plan_date","flavour","cake_size_value","cake_shape","layers_per_cake","cake_units","total_layers","assigned_baker","reason","assignment_status"])
             st.caption("Go to the 'Baked Cake Inventory' tab to mark one of these complete once baked.")
-    with t2:
+    with tab_progress:
         prog_q = filter_orders(df,["Baking"])
         render_queue_table(prog_q, "Cakes Currently Baking", ["baker_assigned"])
         row = select_order(prog_q, "bake_prog")
         if row is not None:
-            order_card(row)
+            order_card(row, show_image=False)
             required_mins = baking_minimum_minutes(row)
             elapsed = minutes_elapsed_since(row.get("baking_started_at"))
             oven_logs = load_table("oven_logs")
@@ -2911,53 +2940,16 @@ def render_baking():
                 st.rerun()
             with b:
                 issue_form("bake", "Baking", "Baking Check", "Baking Correction Required", "Baking", row, row.get("baker_assigned"))
-    with t3:
+    with tab_correction:
         row = select_order(filter_orders(df,["Baking Correction Required"]), "bake_corr")
         if row is not None:
-            order_card(row, [("Issue", row.get("issue_notes"))])
+            order_card(row, [("Issue", row.get("issue_notes"))], show_image=False)
             by = st.text_input("Corrected by", value=disp(row.get("baker_assigned")), key="bake_by3")
             if st.button("🔁 Correction Complete — Resubmit Baking Check", width='stretch'):
                 update_order(row.order_id, {"workflow_status":"Baking", "current_owner":"Baking", "next_action":"Resubmitted for baking check"}, by, "Baking Correction Complete", "Baking")
                 st.rerun()
 
-    with t4:
-        st.markdown("### Flavour Availability for Tomorrow")
-        tomorrow = date.today() + pd.Timedelta(days=1)
-        a,b,c,d = st.columns(4)
-        plan_date = a.date_input("Plan date", value=tomorrow.date() if hasattr(tomorrow, "date") else tomorrow, key="flav_plan_date")
-        flavour = b.text_input("Flavour", key="flav_plan_flavour")
-        availability = c.selectbox("Availability", ["Available","Limited","Not Available"], key="flav_plan_status")
-        updated_by = d.text_input("Updated by", value="Baking", key="flav_plan_by")
-        notes = st.text_input("Notes", key="flav_plan_notes")
-        if st.button("Save Flavour Availability", width='stretch'):
-            if flavour.strip():
-                with connect() as conn:
-                    conn.execute("""INSERT INTO daily_flavour_availability(plan_date,flavour,availability_status,notes,updated_by,updated_at)
-                                    VALUES(?,?,?,?,?,?)
-                                    ON CONFLICT(plan_date,flavour) DO UPDATE SET availability_status=excluded.availability_status,
-                                    notes=excluded.notes,updated_by=excluded.updated_by,updated_at=excluded.updated_at""",
-                                 (str(plan_date), flavour.strip(), availability, notes, updated_by, now_iso()))
-                    conn.commit()
-                st.success("Flavour availability saved."); st.rerun()
-
-        avail = load_table("daily_flavour_availability")
-        table(avail.sort_values(["plan_date","flavour"], ascending=[False,True]).head(100) if not avail.empty else avail,
-              ["plan_date","flavour","availability_status","notes","updated_by","updated_at"])
-
-        st.markdown("### Orders Due by Plan Date")
-        plan_orders = df[col(df,"due_date").astype(str) == str(plan_date)].copy()
-        if not plan_orders.empty:
-            summary = plan_orders.groupby("flavours", dropna=False).agg(
-                Orders=("order_id","count"),
-                Customer_Layers=("final_approved_layers","sum")
-            ).reset_index()
-            buffer = st.number_input("Extra abrupt-client buffer cakes/layers", min_value=0, max_value=10, value=1, step=1)
-            summary["Suggested_With_Buffer"] = summary["Customer_Layers"].fillna(0) + buffer
-            st.dataframe(summary, hide_index=True, width='stretch')
-        else:
-            st.info("No orders due on this plan date.")
-
-    with t5:
+    with tab_cakeinv:
         st.markdown("### Extra Cake Layers for the Day — Assigned to You")
         extra = load_table("extra_baking_assignments")
         pending_extra = extra[extra["assignment_status"].isin(["Assigned","In Progress"])] if not extra.empty else extra
@@ -3009,7 +3001,7 @@ def render_baking():
         table(inv.sort_values("date_baked", ascending=False) if not inv.empty else inv,
               ["id","date_baked","flavour","cake_size_value","cake_shape","number_of_layers","quantity_available","baker","storage_location","inventory_status","reserved_order_id"])
 
-    with t6:
+    with tab_cookieinv:
         st.markdown("### 🍪 Baked Cookie Inventory")
         st.caption("Cookies baked ahead of time and kept on the shelf. Customer Care sells straight from this when fulfilling a cookie order.")
         a,b,c,d = st.columns(4)
@@ -3034,7 +3026,7 @@ def render_baking():
         table(cookie_inv_all.sort_values("date_baked", ascending=False) if not cookie_inv_all.empty else cookie_inv_all,
               ["id","date_baked","flavour","size_category","quantity_available","baker","storage_location","inventory_status","reserved_order_id"])
 
-    with t7:
+    with tab_oven:
         st.markdown("### 🌡️ Oven Temperature & Timing Log")
         st.caption("Start temperature is recorded when baking begins; final temperature when the baking check passes — so we can spot patterns that affect taste and texture.")
         logs = load_table("oven_logs")
@@ -3057,7 +3049,7 @@ def render_baking():
                   ["order_id", "flavour", "product_type", "start_temp_c", "stop_temp_c", "temp_change_c",
                    "oven_start_at", "oven_stop_at", "duration_minutes", "recorded_by_start", "recorded_by_stop"])
 
-    with t8:
+    with tab_batch:
         st.markdown("### 🧮 Batch Board")
         st.caption("What Production Planning has grouped for you to bake — totals only, no customer names or images. "
                    "Log materials against the batch as a whole, then confirm how many layers actually came out once you're done.")
@@ -3092,48 +3084,75 @@ def render_baking():
                         conn.commit()
                     st.rerun()
             else:
-                st.markdown("##### Confirm Actual Layers Baked")
-                actual = st.number_input("Layers actually baked", min_value=0, step=1,
-                                          value=int(brow["total_layers_requested"]), key="batch_actual_layers")
-                if st.button("✅ Confirm Batch Complete → Send Ready Orders to Piling", width='stretch', key="batch_complete_btn"):
-                    with connect() as conn:
-                        conn.execute("UPDATE baking_batches SET status='Complete', actual_layers_baked=?, completed_at=? WHERE id=?",
-                                     (int(actual), now_iso(), int(brow["id"])))
-                        conn.commit()
-                        advanced, waiting = [], []
-                        for _, lrow in linked.iterrows():
-                            order_batches_raw = conn.execute("SELECT baking_batch_number FROM orders WHERE order_id=?", (lrow["order_id"],)).fetchone()
-                            order_batch_numbers = [b.strip() for b in str(order_batches_raw[0] or "").split(",") if b.strip()]
-                            if order_batch_numbers:
-                                placeholders = ",".join("?" * len(order_batch_numbers))
-                                incomplete = conn.execute(
-                                    f"SELECT COUNT(*) FROM baking_batches WHERE batch_number IN ({placeholders}) AND status != 'Complete'",
-                                    order_batch_numbers).fetchone()[0]
-                            else:
-                                incomplete = 0
-                            if incomplete == 0:
-                                conn.execute("""UPDATE orders SET workflow_status='Piling Incoming', current_owner='Filling / Piling',
-                                              next_action=? WHERE order_id=?""",
-                                             (f"Piler to pick from batch {brow['batch_number']}", lrow["order_id"]))
-                                advanced.append(lrow["order_id"])
-                            else:
-                                waiting.append(lrow["order_id"])
-                        conn.commit()
-                    if int(actual) < int(brow["total_layers_requested"]):
-                        st.warning(f"⚠️ Only {actual} of {int(brow['total_layers_requested'])} requested layers were baked — "
-                                   f"flag this shortfall to Production Planning so they can decide which orders it affects.")
-                    if advanced:
-                        st.success(f"{len(advanced)} order(s) sent to Piling, tagged with batch {brow['batch_number']}: {', '.join(advanced)}.")
-                    if waiting:
-                        st.info(f"{len(waiting)} order(s) have more than one flavour and are still waiting on another batch before they can move: {', '.join(waiting)}.")
-                    st.rerun()
+                st.markdown("##### ✅ Tick Off Each Cake As It's Baked")
+                st.caption("Each cake in this batch moves forward on its own the moment it's ticked — it doesn't have to wait for "
+                           "the rest of the batch to finish. This works the same whether the cake has a full design on file yet or not; "
+                           "baking only needs flavour, size, and layers.")
+                pending_in_batch = linked[linked["baked_status"] != "Baked"] if not linked.empty else linked
+                done_in_batch = linked[linked["baked_status"] == "Baked"] if not linked.empty else linked
+                st.info(f"**{len(done_in_batch)} of {len(linked)} cakes baked so far** in this batch.")
+
+                orders_df = load_orders()
+                for _, lrow in pending_in_batch.iterrows():
+                    order_row = orders_df[orders_df["order_id"] == lrow["order_id"]]
+                    flav = disp(order_row.iloc[0].get("flavours")) if not order_row.empty else "—"
+                    size = disp(order_row.iloc[0].get("cake_size_value")) if not order_row.empty else "—"
+                    shape = disp(order_row.iloc[0].get("cake_shape")) if not order_row.empty else "—"
+                    with st.container(border=True):
+                        st.markdown(f"**{lrow['order_id']}** — {flav}, {size}\" {shape} — needs **{int(lrow['layers_needed'])} layers**")
+                        a, b = st.columns([2, 1])
+                        actual_this = a.number_input("Layers actually baked for this cake", min_value=0, step=1,
+                                                       value=int(lrow["layers_needed"]), key=f"batch_tick_qty_{lrow['id']}")
+                        if b.button("✅ Mark This Cake Baked", key=f"batch_tick_btn_{lrow['id']}", width='stretch'):
+                            with connect() as conn:
+                                conn.execute("""UPDATE baking_batch_orders SET baked_status='Baked', actual_layers_baked=?,
+                                              baked_at=?, baked_by=? WHERE id=?""",
+                                             (int(actual_this), now_iso(), by, int(lrow["id"])))
+                                conn.commit()
+                                order_batches_raw = conn.execute("SELECT baking_batch_number FROM orders WHERE order_id=?", (lrow["order_id"],)).fetchone()
+                                order_batch_numbers = [bn.strip() for bn in str(order_batches_raw[0] or "").split(",") if bn.strip()]
+                                still_pending_elsewhere = False
+                                if order_batch_numbers:
+                                    placeholders = ",".join("?" * len(order_batch_numbers))
+                                    linked_all = conn.execute(
+                                        f"""SELECT bbo.baked_status FROM baking_batch_orders bbo
+                                            JOIN baking_batches bb ON bbo.batch_id = bb.id
+                                            WHERE bb.batch_number IN ({placeholders}) AND bbo.order_id=?""",
+                                        order_batch_numbers + [lrow["order_id"]]).fetchall()
+                                    still_pending_elsewhere = any(s[0] != "Baked" for s in linked_all)
+                                if not still_pending_elsewhere:
+                                    conn.execute("""UPDATE orders SET workflow_status='Piling Incoming', current_owner='Filling / Piling',
+                                                  next_action=? WHERE order_id=?""",
+                                                 (f"Piler to pick from batch {brow['batch_number']}", lrow["order_id"]))
+                                    conn.commit()
+                                    st.success(f"{lrow['order_id']} baked and sent straight to Piling.")
+                                else:
+                                    st.info(f"{lrow['order_id']} baked in this batch — still waiting on another flavour batch before it can move to Piling.")
+                                remaining = conn.execute("SELECT COUNT(*) FROM baking_batch_orders WHERE batch_id=? AND baked_status != 'Baked'", (int(brow["id"]),)).fetchone()[0]
+                                if remaining == 0:
+                                    total_actual = conn.execute("SELECT SUM(actual_layers_baked) FROM baking_batch_orders WHERE batch_id=?", (int(brow["id"]),)).fetchone()[0] or 0
+                                    conn.execute("UPDATE baking_batches SET status='Complete', actual_layers_baked=?, completed_at=? WHERE id=?",
+                                                 (int(total_actual), now_iso(), int(brow["id"])))
+                                    conn.commit()
+                                    if int(total_actual) < int(brow["total_layers_requested"]):
+                                        st.warning(f"⚠️ Batch finished with {total_actual} of {int(brow['total_layers_requested'])} requested layers — "
+                                                   f"flag this shortfall to Production Planning.")
+                                    else:
+                                        st.success(f"Batch {brow['batch_number']} fully complete — all cakes baked and moved on.")
+                            st.rerun()
+                if not done_in_batch.empty:
+                    with st.expander(f"Already baked in this batch ({len(done_in_batch)})"):
+                        table(done_in_batch, ["order_id", "layers_needed", "actual_layers_baked", "baked_at", "baked_by"])
 
 
 def render_piling():
     page_header("🎂 Filling / Piling", "Accept baked cakes, pile to correct height, and send to Covering.")
     df = load_orders()
     render_hod_overview("Filling / Piling", df)
-    t1,t2,t3,t4 = st.tabs(["Incoming from Baking", "In Progress", "Correction Required", "End-of-Day Layer Reconciliation"])
+    t0,t1,t2,t3,t4 = st.tabs(["📅 Incoming Workload", "Incoming from Baking", "In Progress", "Correction Required", "End-of-Day Layer Reconciliation"])
+    with t0:
+        pre_piling_statuses = ["Production Planned", "Baking", "Baking Correction Required"]
+        render_incoming_workload_forecast(df, "piler_assigned", "Piler", pre_piling_statuses, "Incoming from Baking")
     with t1:
         incoming_q = filter_orders(df,["Piling Incoming"])
         render_queue_table(incoming_q, "Cakes Incoming From Baking", ["piler_assigned", "baking_batch_number", "decorator_assigned", "icing_type"])
@@ -3230,7 +3249,11 @@ def render_covering():
     page_header("🧁 Coating / Covering", "Check piling/height, cover cake, then send to Decoration.")
     df = load_orders()
     render_hod_overview("Coating / Covering", df)
-    t1,t2,t3 = st.tabs(["Incoming from Piling", "In Progress", "Correction Required"])
+    t0,t1,t2,t3 = st.tabs(["📅 Incoming Workload", "Incoming from Piling", "In Progress", "Correction Required"])
+    with t0:
+        pre_covering_statuses = ["Production Planned", "Baking", "Baking Correction Required",
+                                  "Piling Incoming", "Piling", "Piling Correction Required"]
+        render_incoming_workload_forecast(df, "coverer_assigned", "Coverer", pre_covering_statuses, "Incoming from Piling")
     with t1:
         incoming_q = filter_orders(df,["Covering Incoming"])
         render_queue_table(incoming_q, "Cakes Incoming From Piling", ["coverer_assigned", "decorator_assigned", "icing_type"])
@@ -3371,35 +3394,42 @@ def decoration_minimum_minutes(row):
     return MINUTES_DECORATION_DEFAULT
 
 
+def render_incoming_workload_forecast(df, staff_column, role_label, pre_stage_statuses, next_stage_label):
+    """Shows everyone assigned-but-not-yet-arrived work for a given role, so the whole
+    department can see what's coming (not just what's already sitting at their door).
+    Pure view-only — no action buttons here."""
+    st.markdown("### What's Coming Our Way")
+    st.caption(f"Every cake already assigned to a {role_label.lower()}, wherever it currently sits earlier in the pipeline, "
+               f"so the whole department can see the workload coming, not just what's already sitting at our door. "
+               f"This is view-only — you can only work on a cake once it actually reaches '{next_stage_label}'.")
+    upcoming = df[
+        (df["workflow_status"].isin(pre_stage_statuses)) &
+        (df[staff_column].notna()) & (df[staff_column] != "")
+    ] if not df.empty and staff_column in df.columns else df.iloc[0:0]
+    if upcoming.empty:
+        st.info("Nothing assigned to us yet that's still earlier in the pipeline.")
+    else:
+        counts_by_day = upcoming.groupby("due_date").size().reset_index(name="count").sort_values("due_date")
+        cols = st.columns(min(len(counts_by_day), 6) or 1)
+        for i, (_, day_row) in enumerate(counts_by_day.head(6).iterrows()):
+            with cols[i % len(cols)]:
+                st.metric(day_row["due_date"], f"{day_row['count']} cake(s)")
+        st.markdown("#### Full List")
+        table(upcoming.sort_values(["due_date", "expected_time"]),
+              ["order_id", "product_type", "due_date", "expected_time", "flavours", "cake_size_value",
+               "cake_shape", staff_column, "workflow_status", "urgency_level"])
+
+
 def render_decoration():
     page_header("🎨 Decoration", "Accept covering, receive topper handoffs, decorate, and send to Studio.")
     df = load_orders()
     render_hod_overview("Decoration", df)
     t0,t1,t2,t3,t4 = st.tabs(["📅 Incoming Workload", "Incoming from Covering", "Materials Planning", "Decorating", "Correction Required"])
     with t0:
-        st.markdown("### What's Coming Our Way")
-        st.caption("Every cake already assigned to a decorator, wherever it currently sits in the pipeline — Baking, Piling, or Covering — "
-                   "so the whole department can see the workload coming, not just what's already sitting at our door. This is view-only; "
-                   "you can only work on a cake once it actually reaches 'Incoming from Covering' below.")
         pre_decoration_statuses = ["Production Planned", "Baking", "Baking Correction Required",
                                     "Piling Incoming", "Piling", "Piling Correction Required",
                                     "Covering Incoming", "Covering", "Covering Correction Required"]
-        upcoming = df[
-            (df["workflow_status"].isin(pre_decoration_statuses)) &
-            (df["decorator_assigned"].notna()) & (df["decorator_assigned"] != "")
-        ] if not df.empty and "decorator_assigned" in df.columns else df.iloc[0:0]
-        if upcoming.empty:
-            st.info("Nothing assigned to us yet that's still earlier in the pipeline.")
-        else:
-            counts_by_day = upcoming.groupby("due_date").size().reset_index(name="count").sort_values("due_date")
-            cols = st.columns(min(len(counts_by_day), 6) or 1)
-            for i, (_, day_row) in enumerate(counts_by_day.head(6).iterrows()):
-                with cols[i % len(cols)]:
-                    st.metric(day_row["due_date"], f"{day_row['count']} cake(s)")
-            st.markdown("#### Full List")
-            table(upcoming.sort_values(["due_date", "expected_time"]),
-                  ["order_id", "product_type", "due_date", "expected_time", "flavours", "cake_size_value",
-                   "cake_shape", "decorator_assigned", "workflow_status", "urgency_level"])
+        render_incoming_workload_forecast(df, "decorator_assigned", "Decorator", pre_decoration_statuses, "Incoming from Covering")
     with t1:
         incoming_q = filter_orders(df,["Decorating Incoming"])
         render_queue_table(incoming_q, "Cakes Incoming From Covering", ["decorator_assigned", "icing_type"])
