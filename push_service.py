@@ -30,9 +30,7 @@ def connect():
     return conn
 
 
-@app.route("/push/service-worker.js")
-def service_worker():
-    js = """
+SERVICE_WORKER_JS = """
 self.addEventListener('push', function(event) {
     let data = {title: 'Cake Album Operations', body: 'New update'};
     try { data = event.data.json(); } catch (e) {}
@@ -59,7 +57,23 @@ self.addEventListener('notificationclick', function(event) {
     );
 });
 """
-    return Response(js, mimetype="application/javascript")
+
+
+@app.route("/service-worker.js")
+def service_worker_root():
+    # This is the route that actually matters. A service worker's default scope is the
+    # directory it's served from - registering it from /push/service-worker.js meant it
+    # could only ever control pages under /push/, never the actual app at the site root.
+    # Serving it from here instead gives it the whole site as its scope, which is what
+    # navigator.serviceWorker.ready needs in order to ever resolve for the main app page.
+    return Response(SERVICE_WORKER_JS, mimetype="application/javascript")
+
+
+@app.route("/push/service-worker.js")
+def service_worker():
+    # Kept for backward compatibility - the /service-worker.js route above is the one
+    # that actually matters for scope reasons.
+    return Response(SERVICE_WORKER_JS, mimetype="application/javascript")
 
 
 @app.route("/push/subscribe", methods=["POST"])
