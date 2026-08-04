@@ -490,6 +490,8 @@ def _render_department_notifications_body():
       <span id="ca-notifications-unsupported" style="display:none;color:#8C1D1D;font-size:0.85rem;">
         This browser does not support desktop notifications.
       </span>
+      <div id="ca-notification-diagnostic" style="display:none;margin-top:6px;padding:8px 10px;border-radius:6px;
+        background:#FFF3CD;color:#664D03;font-size:0.8rem;font-family:monospace;white-space:pre-wrap;"></div>
     </div>
     <script>
     (() => {{
@@ -499,7 +501,13 @@ def _render_department_notifications_body():
       const testButton = document.getElementById("ca-test-notification");
       const blocked = document.getElementById("ca-notifications-blocked");
       const unsupported = document.getElementById("ca-notifications-unsupported");
+      const diagnostic = document.getElementById("ca-notification-diagnostic");
       const storageKey = "cake_album_announced_notification_ids_v2";
+
+      function showDiagnostic(text) {{
+        diagnostic.style.display = "block";
+        diagnostic.textContent = text;
+      }}
 
       document.title = unreadCount > 0
         ? `🔔 (${{unreadCount}}) Cake Album Operations`
@@ -510,6 +518,9 @@ def _render_department_notifications_body():
         const body = isTest ? "Notifications are working on this device." : item.message;
         const tag = isTest ? "cake-album-test" : `cake-album-${{item.id}}`;
         const options = {{ body, tag, renotify: !isTest, requireInteraction: false }};
+        const log = [];
+        log.push(`Permission: ${{Notification.permission}}`);
+        log.push(`Service worker support: ${{"serviceWorker" in navigator}}`);
         // Android Chrome throws on `new Notification()` outright — it requires notifications
         // to go through a service worker registration instead. Desktop browsers support both,
         // so trying the service worker route first works everywhere, not just on phones.
@@ -518,18 +529,29 @@ def _render_department_notifications_body():
         // service worker that never activates can't hang this forever.
         if ("serviceWorker" in navigator) {{
           try {{
+            const reg = await navigator.serviceWorker.register("/push/service-worker.js");
+            log.push(`SW registered, scope: ${{reg.scope}}`);
             const registration = await Promise.race([
-              navigator.serviceWorker.register("/push/service-worker.js").then(() => navigator.serviceWorker.ready),
-              new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 4000))
+              navigator.serviceWorker.ready,
+              new Promise((_, reject) => setTimeout(() => reject(new Error("SW ready timed out after 4s")), 4000))
             ]);
             await registration.showNotification(title, options);
+            log.push("showNotification via service worker: SUCCESS");
+            if (isTest) showDiagnostic(log.join("\\n"));
             return;
-          }} catch (e) {{ /* fall through to the direct constructor below */ }}
+          }} catch (e) {{
+            log.push(`Service worker path failed: ${{e.name}}: ${{e.message}}`);
+          }}
         }}
         try {{
           const n = new Notification(title, options);
           n.onclick = () => {{ window.focus(); n.close(); }};
-        }} catch (e) {{ /* neither method available on this browser — nothing more we can do */ }}
+          log.push("showNotification via direct constructor: SUCCESS");
+          if (isTest) showDiagnostic(log.join("\\n"));
+        }} catch (e) {{
+          log.push(`Direct constructor also failed: ${{e.name}}: ${{e.message}}`);
+          showDiagnostic(log.join("\\n"));
+        }}
       }}
 
       function readSeen() {{
