@@ -505,16 +505,31 @@ def _render_department_notifications_body():
         ? `🔔 (${{unreadCount}}) Cake Album Operations`
         : "Cake Album Operations";
 
-      function showNotification(item, isTest=false) {{
+      async function showNotification(item, isTest=false) {{
         const title = isTest ? "Cake Album — Test successful" : "Cake Album — New job assigned";
-        const body = isTest ? "Desktop notifications are working on this computer." : item.message;
-        const n = new Notification(title, {{
-          body,
-          tag: isTest ? "cake-album-test" : `cake-album-${{item.id}}`,
-          renotify: !isTest,
-          requireInteraction: false
-        }});
-        n.onclick = () => {{ window.focus(); n.close(); }};
+        const body = isTest ? "Notifications are working on this device." : item.message;
+        const tag = isTest ? "cake-album-test" : `cake-album-${{item.id}}`;
+        const options = {{ body, tag, renotify: !isTest, requireInteraction: false }};
+        // Android Chrome throws on `new Notification()` outright — it requires notifications
+        // to go through a service worker registration instead. Desktop browsers support both,
+        // so trying the service worker route first works everywhere, not just on phones.
+        // Registering here directly (not just waiting on .ready) means this never depends on
+        // the separate push-subscription flow having already run — and a timeout means a
+        // service worker that never activates can't hang this forever.
+        if ("serviceWorker" in navigator) {{
+          try {{
+            const registration = await Promise.race([
+              navigator.serviceWorker.register("/push/service-worker.js").then(() => navigator.serviceWorker.ready),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 4000))
+            ]);
+            await registration.showNotification(title, options);
+            return;
+          }} catch (e) {{ /* fall through to the direct constructor below */ }}
+        }}
+        try {{
+          const n = new Notification(title, options);
+          n.onclick = () => {{ window.focus(); n.close(); }};
+        }} catch (e) {{ /* neither method available on this browser — nothing more we can do */ }}
       }}
 
       function readSeen() {{
