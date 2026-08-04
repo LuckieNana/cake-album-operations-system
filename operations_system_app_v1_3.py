@@ -529,7 +529,7 @@ def _render_department_notifications_body():
         // service worker that never activates can't hang this forever.
         if ("serviceWorker" in navigator) {{
           try {{
-            const reg = await navigator.serviceWorker.register("/push/service-worker.js");
+            const reg = await navigator.serviceWorker.register("/service-worker.js");
             log.push(`SW registered, scope: ${{reg.scope}}`);
             const registration = await Promise.race([
               navigator.serviceWorker.ready,
@@ -604,7 +604,7 @@ def _render_department_notifications_body():
         const departments = {departments_json};
         if (!vapidPublicKey || !("serviceWorker" in navigator) || !("PushManager" in window)) return;
         try {{
-          const registration = await navigator.serviceWorker.register("/push/service-worker.js");
+          const registration = await navigator.serviceWorker.register("/service-worker.js");
           await navigator.serviceWorker.ready;
           let subscription = await registration.pushManager.getSubscription();
           if (!subscription) {{
