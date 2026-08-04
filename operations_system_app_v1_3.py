@@ -1339,23 +1339,31 @@ VAPID_CLAIMS = {"sub": "mailto:admin@cakealbumerp.com"}
 
 def send_push_notification(target_department, title, body):
     """Sends a real push notification (works even with the browser closed) to every phone/desktop
-    subscribed for this department. Silently does nothing if push isn't set up yet on this server,
-    or if pywebpush isn't installed — this must never break the app's core notification system."""
+    subscribed for this department. Logs every step so failures are actually traceable via
+    `journalctl -u cakealbum` — this must never raise and break the app's core notification
+    system, but it should never fail silently either."""
+    print(f"[PUSH] send_push_notification called for department='{target_department}'")
     if not VAPID_PRIVATE_KEY_FILE.exists():
+        print(f"[PUSH] SKIPPED — VAPID_PRIVATE_KEY_FILE not found at {VAPID_PRIVATE_KEY_FILE}")
         return
     try:
         from pywebpush import webpush, WebPushException
     except ImportError:
+        print("[PUSH] SKIPPED — pywebpush is not installed in this environment")
         return
     with connect() as conn:
         conn.row_factory = sqlite3.Row
         try:
             all_subs = conn.execute("SELECT endpoint, department, subscription_json FROM push_subscriptions").fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as e:
+            print(f"[PUSH] SKIPPED — push_subscriptions table not queryable: {e}")
             return
+    print(f"[PUSH] {len(all_subs)} total subscription(s) in the database")
     subs = [s for s in all_subs if target_department in [d.strip() for d in (s["department"] or "").split(",")]]
+    print(f"[PUSH] {len(subs)} subscription(s) match department '{target_department}'")
     dead_endpoints = []
     for sub in subs:
+        endpoint_short = sub["endpoint"][:60]
         try:
             webpush(
                 subscription_info=json.loads(sub["subscription_json"]),
@@ -1363,15 +1371,20 @@ def send_push_notification(target_department, title, body):
                 vapid_private_key=str(VAPID_PRIVATE_KEY_FILE),
                 vapid_claims=dict(VAPID_CLAIMS),
             )
+            print(f"[PUSH] SUCCESS sending to {endpoint_short}...")
         except WebPushException as e:
+            status = e.response.status_code if e.response is not None else "no response"
+            body_text = e.response.text if e.response is not None else ""
+            print(f"[PUSH] FAILED (WebPushException) sending to {endpoint_short}... — status={status} body={body_text[:200]}")
             if e.response is not None and e.response.status_code in (404, 410):
                 dead_endpoints.append(sub["endpoint"])
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[PUSH] FAILED (unexpected {type(e).__name__}) sending to {endpoint_short}... — {e}")
     if dead_endpoints:
         with connect() as conn:
             conn.executemany("DELETE FROM push_subscriptions WHERE endpoint=?", [(e,) for e in dead_endpoints])
             conn.commit()
+        print(f"[PUSH] Removed {len(dead_endpoints)} dead subscription(s)")
 
 MATERIAL_COLOURS = ["N/A", "White", "Red", "Pink", "Purple", "Blue", "Green", "Yellow",
                     "Gold", "Silver", "Black", "Brown", "Ivory / Cream", "Multicolour", "Other"]
