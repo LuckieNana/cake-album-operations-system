@@ -13,6 +13,7 @@ import hashlib
 import base64
 import time
 import json
+import re
 import secrets as secrets_mod
 from pathlib import Path
 from datetime import datetime, date, time as dtime, timedelta
@@ -3829,11 +3830,11 @@ def render_decoration():
 
 
 def render_studio_qc():
-    page_header("🔍 Studio / Final QC, Packaging & Dispatch", "One continuous platform: final quality control, packaging, delivery notes, dispatch planning, and driver delivery.")
+    page_header("🔍 Final QC & Packaging", "One continuous platform: final quality control, packaging, delivery notes, and dispatch planning.")
     df = load_orders()
     render_hod_overview("Studio / Final QC", df)
-    qc_tab, packaging_tab, dispatch_tab, driver_tab = st.tabs(
-        ["Final QC", "Packaging & Delivery Notes", "Dispatch Planning", "Driver Delivery"])
+    qc_tab, packaging_tab, dispatch_tab = st.tabs(
+        ["Final QC", "Packaging & Delivery Notes", "Dispatch Planning"])
     with qc_tab:
         check_q = filter_orders(df,["Studio Check"])
         render_queue_table(check_q, "Cakes Awaiting Final QC", ["decorator_assigned"])
@@ -3854,8 +3855,6 @@ def render_studio_qc():
         render_packaging(show_header=False)
     with dispatch_tab:
         render_dispatch(show_header=False)
-    with driver_tab:
-        render_driver(show_header=False)
 
 
 def render_procurement():
@@ -4068,7 +4067,27 @@ def render_dispatch(show_header=True):
 
 def render_driver(show_header=True):
     if show_header:
-        page_header("🚗 Driver", "Simple delivery flow: Start Run → Arrived → Payment/Delivered → Next Stop.")
+        page_header("🚗 Driver Delivery", "Simple delivery flow: Start Ride → Arrived → Payment/Delivered → Next Stop.")
+    # Bigger, touch-friendly buttons for a phone in a moving vehicle — normal-sized buttons
+    # are genuinely hard to tap accurately while driving/parked and in a hurry.
+    st.markdown("""
+    <style>
+    div[data-testid="stButton"] > button {
+        font-size: 1.15rem !important;
+        padding: 18px 10px !important;
+        min-height: 64px !important;
+        font-weight: 600 !important;
+        border-radius: 10px !important;
+    }
+    a.ca-call-btn {
+        display: flex; align-items: center; justify-content: center;
+        font-size: 1.15rem; font-weight: 600; text-decoration: none;
+        min-height: 64px; padding: 18px 10px; border-radius: 10px;
+        background-color: #F0E6F5; color: #1A1420; border: 1px solid #4B2A5C;
+        width: 100%; box-sizing: border-box;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     runs = load_table("delivery_runs")
     if runs.empty:
         st.info("No delivery runs yet.")
@@ -4114,7 +4133,7 @@ def render_driver(show_header=True):
             st.rerun()
 
     table(merged, ["stop_sequence","order_id","customer_name","customer_number","location","expected_time","balance_to_collect","stop_delivery_status"])
-    active = merged[merged["stop_delivery_status"].isin(["Planned","Arrived","Finance Pending","Payment Confirmed"])]
+    active = merged[merged["stop_delivery_status"].isin(["Planned","En Route","Arrived","Finance Pending","Payment Confirmed"])]
     if active.empty:
         st.success("All stops completed.")
         if st.button("✅ Complete Delivery Run", width='stretch'):
@@ -4138,8 +4157,28 @@ def render_driver(show_header=True):
                 st.warning(f"⚠️ Outside the customer's delivery window ({win_start}–{win_end}). Consider calling ahead.")
         except Exception:
             pass
+
+    phone = disp(current.get("customer_number"))
+    call_col, ride_col = st.columns(2)
+    with call_col:
+        if phone != "—":
+            phone_clean = re.sub(r"[^0-9+]", "", str(phone))
+            st.markdown(f'<a class="ca-call-btn" href="tel:{phone_clean}">📞 Call {first_name(current.get("customer_name")) or "Client"}</a>',
+                        unsafe_allow_html=True)
+        else:
+            st.button("📞 No Phone Number on File", disabled=True, width='stretch')
+    with ride_col:
+        not_started = current.stop_delivery_status == "Planned"
+        if ride_col.button("🚗 Start Ride to This Stop" if not_started else "🚗 Already En Route",
+                            disabled=not not_started, width='stretch'):
+            with connect() as conn:
+                conn.execute("UPDATE delivery_run_orders SET delivery_status='En Route' WHERE id=?", (int(current.stop_record_id),))
+                conn.execute("UPDATE orders SET delivery_status='En Route', workflow_status='Driver En Route', current_owner='Driver', next_action='Arrive and hand over' WHERE order_id=?", (current.order_id,))
+                conn.commit()
+            refresh_data(); st.rerun()
+
     a,b,c = st.columns(3)
-    already_arrived = current.stop_delivery_status != "Planned"
+    already_arrived = current.stop_delivery_status not in ("Planned", "En Route")
     if a.button("📍 Arrived at Destination" if not already_arrived else "✅ Already Marked Arrived",
                 disabled=already_arrived, width='stretch'):
         with connect() as conn:
@@ -4637,7 +4676,7 @@ PAGES = {
     "Design & Innovation": render_design_innovation,
     "Decoration": render_decoration,
     "Studio / Final QC": render_studio_qc,
-    "Dispatch / Driver": render_studio_qc,
+    "Dispatch / Driver": render_driver,
     "Procurement": render_procurement,
 }
 
