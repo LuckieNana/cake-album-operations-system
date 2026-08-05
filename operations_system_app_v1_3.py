@@ -4175,6 +4175,9 @@ def render_driver(show_header=True):
                 conn.execute("UPDATE delivery_run_orders SET delivery_status='En Route' WHERE id=?", (int(current.stop_record_id),))
                 conn.execute("UPDATE orders SET delivery_status='En Route', workflow_status='Driver En Route', current_owner='Driver', next_action='Arrive and hand over' WHERE order_id=?", (current.order_id,))
                 conn.commit()
+            create_notification(current.order_id, "Customer Care", None,
+                                 f"🚗 {current.order_id} ({disp(current.get('customer_name'))}) — driver is now on the way, "
+                                 f"in case the customer calls asking.")
             refresh_data(); st.rerun()
 
     a,b,c = st.columns(3)
@@ -4185,6 +4188,12 @@ def render_driver(show_header=True):
             conn.execute("UPDATE delivery_run_orders SET arrival_time=?, delivery_status='Arrived' WHERE id=?", (now_iso(), int(current.stop_record_id)))
             conn.execute("UPDATE orders SET delivery_status='Arrived', workflow_status='Arrived at Destination', current_owner='Driver', next_action='Collect balance or complete handover' WHERE order_id=?", (current.order_id,))
             conn.commit()
+        create_notification(current.order_id, "Customer Care", None,
+                             f"📍 {current.order_id} ({disp(current.get('customer_name'))}) — driver has arrived at the destination.")
+        if float(current.balance_to_collect or 0) > 0:
+            create_notification(current.order_id, "Finance", None,
+                                 f"📍 {current.order_id} ({disp(current.get('customer_name'))}) — driver has arrived, "
+                                 f"a balance of {fmt_ugx(current.balance_to_collect)} will need confirming shortly.")
         refresh_data(); st.rerun()
     balance = float(current.balance_to_collect or 0)
     if b.button("💰 Request Finance Confirmation" if balance > 0 else "No Balance Needed", disabled=balance <= 0, width='stretch'):
@@ -4192,6 +4201,9 @@ def render_driver(show_header=True):
             conn.execute("UPDATE delivery_run_orders SET finance_confirmation_requested_at=?, delivery_status='Finance Pending' WHERE id=?", (now_iso(), int(current.stop_record_id)))
             conn.execute("UPDATE orders SET workflow_status='Finance Payment Confirmation Pending', current_owner='Finance', next_action='Confirm delivery balance received' WHERE order_id=?", (current.order_id,))
             conn.commit()
+        create_notification(current.order_id, "Finance", None,
+                             f"💰 {current.order_id} ({disp(current.get('customer_name'))}) — driver is requesting confirmation "
+                             f"of {fmt_ugx(balance)} collected on delivery.")
         refresh_data(); st.rerun()
     can_deliver = balance <= 0 or current.workflow_status == "Payment Confirmed" or current.stop_delivery_status == "Payment Confirmed"
     if c.button("✅ Delivered / Next Stop", disabled=not can_deliver, width='stretch'):
@@ -4199,6 +4211,8 @@ def render_driver(show_header=True):
             conn.execute("UPDATE delivery_run_orders SET delivery_completed_at=?, delivery_status='Delivered' WHERE id=?", (now_iso(), int(current.stop_record_id)))
             conn.execute("UPDATE orders SET workflow_status='Follow-up Pending', current_owner='Customer Care', next_action='Customer follow-up', delivery_status='Delivered', delivered_at=? WHERE order_id=?", (now_iso(), current.order_id))
             conn.commit()
+        create_notification(current.order_id, "Customer Care", None,
+                             f"✅ {current.order_id} ({disp(current.get('customer_name'))}) has been delivered — ready for follow-up.")
         refresh_data(); st.rerun()
 
 
