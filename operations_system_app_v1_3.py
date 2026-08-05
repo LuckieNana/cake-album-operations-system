@@ -352,21 +352,13 @@ def page_header(title: str, subtitle: str = ""):
 
 
 def render_auto_refresh_toggle():
-    """Auto-check for new/updated orders and notifications. Uses Streamlit's own rerun (not
-    a full browser page reload), so your current tab and selections stay put — just the data
-    underneath refreshes. On by default — this is what actually lets new work get noticed
-    without someone needing to remember to click 'Check now' themselves."""
-    call_n = st.session_state.get("_refresh_widget_calls", 0) + 1
-    st.session_state["_refresh_widget_calls"] = call_n
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        auto_on = st.checkbox("🔄 Auto-check (30s)", value=True, key=f"auto_refresh_toggle_{call_n}",
-                               help="Quietly re-checks for new orders, assignments, and notifications every 30 seconds — your place on the page is kept. Turn off only if it feels disruptive.")
-    with col2:
-        if st.button("Check now", key=f"manual_refresh_btn_{call_n}"):
-            st.rerun()
-    if auto_on:
-        time.sleep(30)
+    """Manual refresh for queue tables and order data. Notifications themselves are already
+    handled independently and reliably by the fragment above (refreshes every 10s on its own,
+    without reloading the page) — this button is just for someone who wants to force queue
+    tables to update right now, without the battery cost or visible flicker of an automatic
+    full-page rerun every 30 seconds."""
+    if st.button("🔄 Check now", key=f"manual_refresh_btn_{st.session_state.get('_refresh_widget_calls', 0)}"):
+        st.session_state["_refresh_widget_calls"] = st.session_state.get("_refresh_widget_calls", 0) + 1
         st.rerun()
 
 
@@ -1341,26 +1333,28 @@ def send_push_notification(target_department, title, body):
     """Sends a real push notification (works even with the browser closed) to every phone/desktop
     subscribed for this department. Logs every step so failures are actually traceable via
     `journalctl -u cakealbum` — this must never raise and break the app's core notification
-    system, but it should never fail silently either."""
-    print(f"[PUSH] send_push_notification called for department='{target_department}'")
+    system, but it should never fail silently either. flush=True on every line because print()
+    output can otherwise sit in a buffer indefinitely when running as a background service,
+    never actually reaching journalctl in real time."""
+    print(f"[PUSH] send_push_notification called for department='{target_department}'", flush=True)
     if not VAPID_PRIVATE_KEY_FILE.exists():
-        print(f"[PUSH] SKIPPED — VAPID_PRIVATE_KEY_FILE not found at {VAPID_PRIVATE_KEY_FILE}")
+        print(f"[PUSH] SKIPPED — VAPID_PRIVATE_KEY_FILE not found at {VAPID_PRIVATE_KEY_FILE}", flush=True)
         return
     try:
         from pywebpush import webpush, WebPushException
     except ImportError:
-        print("[PUSH] SKIPPED — pywebpush is not installed in this environment")
+        print("[PUSH] SKIPPED — pywebpush is not installed in this environment", flush=True)
         return
     with connect() as conn:
         conn.row_factory = sqlite3.Row
         try:
             all_subs = conn.execute("SELECT endpoint, department, subscription_json FROM push_subscriptions").fetchall()
         except sqlite3.OperationalError as e:
-            print(f"[PUSH] SKIPPED — push_subscriptions table not queryable: {e}")
+            print(f"[PUSH] SKIPPED — push_subscriptions table not queryable: {e}", flush=True)
             return
-    print(f"[PUSH] {len(all_subs)} total subscription(s) in the database")
+    print(f"[PUSH] {len(all_subs)} total subscription(s) in the database", flush=True)
     subs = [s for s in all_subs if target_department in [d.strip() for d in (s["department"] or "").split(",")]]
-    print(f"[PUSH] {len(subs)} subscription(s) match department '{target_department}'")
+    print(f"[PUSH] {len(subs)} subscription(s) match department '{target_department}'", flush=True)
     dead_endpoints = []
     for sub in subs:
         endpoint_short = sub["endpoint"][:60]
@@ -1371,20 +1365,20 @@ def send_push_notification(target_department, title, body):
                 vapid_private_key=str(VAPID_PRIVATE_KEY_FILE),
                 vapid_claims=dict(VAPID_CLAIMS),
             )
-            print(f"[PUSH] SUCCESS sending to {endpoint_short}...")
+            print(f"[PUSH] SUCCESS sending to {endpoint_short}...", flush=True)
         except WebPushException as e:
             status = e.response.status_code if e.response is not None else "no response"
             body_text = e.response.text if e.response is not None else ""
-            print(f"[PUSH] FAILED (WebPushException) sending to {endpoint_short}... — status={status} body={body_text[:200]}")
+            print(f"[PUSH] FAILED (WebPushException) sending to {endpoint_short}... — status={status} body={body_text[:200]}", flush=True)
             if e.response is not None and e.response.status_code in (404, 410):
                 dead_endpoints.append(sub["endpoint"])
         except Exception as e:
-            print(f"[PUSH] FAILED (unexpected {type(e).__name__}) sending to {endpoint_short}... — {e}")
+            print(f"[PUSH] FAILED (unexpected {type(e).__name__}) sending to {endpoint_short}... — {e}", flush=True)
     if dead_endpoints:
         with connect() as conn:
             conn.executemany("DELETE FROM push_subscriptions WHERE endpoint=?", [(e,) for e in dead_endpoints])
             conn.commit()
-        print(f"[PUSH] Removed {len(dead_endpoints)} dead subscription(s)")
+        print(f"[PUSH] Removed {len(dead_endpoints)} dead subscription(s)", flush=True)
 
 MATERIAL_COLOURS = ["N/A", "White", "Red", "Pink", "Purple", "Blue", "Green", "Yellow",
                     "Gold", "Silver", "Black", "Brown", "Ivory / Cream", "Multicolour", "Other"]
@@ -1393,9 +1387,9 @@ MATERIAL_COLOURS = ["N/A", "White", "Red", "Pink", "Purple", "Blue", "Green", "Y
 MATERIAL_SIZE_FAMILIES = {"Cake Boxes", "Cake Boards", "Wrapping Paper"}
 
 
-def render_stage_material_planning(stage, row, default_by):
+def render_stage_material_planning(stage, row, default_by, key_prefix=None):
     order_key = str(row.get("order_id") if hasattr(row, "get") else row.order_id).replace(" ", "_")
-    key_prefix = f"mat_{stage}_{order_key}"
+    key_prefix = f"mat_{stage}_{order_key}" if key_prefix is None else f"mat_{stage}_{order_key}_{key_prefix}"
     st.markdown("### Materials Planning / Usage")
     st.caption("Record what this cake needs or uses — including colour, size, quantity, or weight — so Procurement can track usage.")
     a,b,c = st.columns(3)
@@ -2338,11 +2332,32 @@ def render_customer_care():
     delivery_date = a.date_input("Delivery Date", value=due_date, help="The day the cake actually goes out — may be the same as the due date, or later.", key="nc_delivery_date")
     st.caption(f"📅 {delivery_date.strftime('%A')}" if delivery_date else "")
 
+    st.markdown("### Customer Details")
+    st.caption("Search for a returning customer to pick their name and number automatically — cuts down on typos and duplicate entries. Pick \"+ New Customer\" if they're not in here yet.")
+    past_customers = load_orders()
+    customer_options = ["+ New Customer"]
+    customer_lookup = {}
+    if not past_customers.empty and "customer_name" in past_customers.columns:
+        seen_pairs = set()
+        for _, prow in past_customers.iterrows():
+            cname = disp(prow.get("customer_name"))
+            cphone = disp(prow.get("customer_number"))
+            if cname != "—" and (cname, cphone) not in seen_pairs:
+                seen_pairs.add((cname, cphone))
+                label = f"{cname} — {cphone}" if cphone != "—" else cname
+                customer_options.append(label)
+                customer_lookup[label] = (cname, cphone if cphone != "—" else "")
+    customer_pick = st.selectbox("Customer", sorted(customer_options[1:]) + [customer_options[0]] if len(customer_options) > 1 else customer_options,
+                                  key="nc_customer_pick")
+    if customer_pick != "+ New Customer" and customer_pick in customer_lookup:
+        prefill_name, prefill_phone = customer_lookup[customer_pick]
+    else:
+        prefill_name, prefill_phone = "", ""
+
     with st.form("new_order_form", clear_on_submit=True):
-        st.markdown("### Customer Details")
         a,b = st.columns(2)
-        customer_name = a.text_input("Customer Name *")
-        customer_number = b.text_input("Customer Phone *")
+        customer_name = a.text_input("Customer Name *", value=prefill_name)
+        customer_number = b.text_input("Customer Phone *", value=prefill_phone)
 
         st.markdown("### Order Type")
         a,b = st.columns(2)
@@ -3927,6 +3942,30 @@ def delivery_note_html(row, fmt="full"):
     """
 
 
+def render_packaging_finish_step(row, key_prefix):
+    order_card(row)
+    packaging_materials_ready = render_stage_material_planning("Packaging", row, st.session_state.get("staff_name", "Studio"), key_prefix=key_prefix)
+    if not packaging_materials_ready:
+        st.warning("Record packaging materials before completing this job.")
+    st.markdown("### Print / Delivery Note")
+    print_fmt = st.radio(
+        "What are you printing?",
+        ["Full Delivery Note (one page, for the customer)", "Small Box Label (thermal/receipt printer, sticks on the box)"],
+        key=f"{key_prefix}_print_fmt")
+    fmt = "label" if print_fmt.startswith("Small") else "full"
+    if fmt == "label":
+        st.caption("Designed for narrow thermal/receipt printers (~76mm roll width). If your printer uses a different width, adjust the printer's paper size setting before printing.")
+    st.markdown(delivery_note_html(row, fmt), unsafe_allow_html=True)
+    st.info("Press Ctrl + P (or your printer app's print option). It now prints on a single page/label only — the rest of the screen is hidden automatically.")
+    by = st.text_input("Updated by", value="Packaging", key=f"{key_prefix}_by2")
+    if st.button("✅ Packaging Complete → Ready for Dispatch", width='stretch', disabled=not packaging_materials_ready, key=f"{key_prefix}_complete_btn"):
+        update_order(row.order_id, {"workflow_status":"Ready for Dispatch", "current_owner":"Dispatch", "next_action":"Assign to delivery run", "packaging_status":"Complete", "packaging_completed_at":now_iso()}, by, "Packaging Complete", "Packaging")
+        create_notification(row.order_id, "Dispatch / Driver", None,
+                             f"📦 {row.order_id} ({disp(row.get('customer_name'))}) is packaged and ready for a delivery run.")
+        st.session_state.pop("_just_started_packaging", None)
+        st.rerun()
+
+
 def render_packaging(show_header=True):
     if show_header:
         page_header("📦 Packaging", "Pack cake, print simple delivery note, and send to Dispatch.")
@@ -3945,30 +3984,27 @@ def render_packaging(show_header=True):
             by = st.text_input("Updated by", value=first_name(st.session_state.get("staff_name", "Studio")), key="pack_by1")
             if st.button("▶️ Start Packaging", width='stretch', disabled=not packaging_materials_ready):
                 update_order(row.order_id, {"workflow_status":"Packaging", "current_owner":"Packaging", "next_action":"Print delivery note and complete packaging", "packaging_status":"In Progress"}, by, "Packaging Started", "Packaging")
+                st.session_state["_just_started_packaging"] = row.order_id
                 st.rerun()
+        # Once "Start Packaging" moves the order forward, it no longer matches this tab's own
+        # query above — row becomes None, so this check must live outside the "if row is not
+        # None" block above, not inside it, or it could never actually run. Without this, the
+        # order would seem to silently vanish, when really it just needs the delivery-note step
+        # below to finish — showing that step right here means nobody has to go hunting through
+        # a different tab to continue.
+        just_started_id = st.session_state.get("_just_started_packaging")
+        if just_started_id:
+            fresh_df = load_orders()
+            fresh_row = fresh_df[fresh_df["order_id"] == just_started_id]
+            if not fresh_row.empty and fresh_row.iloc[0]["workflow_status"] == "Packaging":
+                st.success(f"{just_started_id} moved to packaging — continue right here to finish it.")
+                render_packaging_finish_step(fresh_row.iloc[0], key_prefix="pack_inline")
+            else:
+                st.session_state.pop("_just_started_packaging", None)
     with t2:
         row = select_order(filter_orders(df,["Packaging"]), "pack_prog")
         if row is not None:
-            order_card(row)
-            packaging_materials_ready = render_stage_material_planning("Packaging", row, st.session_state.get("staff_name", "Studio"))
-            if not packaging_materials_ready:
-                st.warning("Record packaging materials before completing this job.")
-            st.markdown("### Print / Delivery Note")
-            print_fmt = st.radio(
-                "What are you printing?",
-                ["Full Delivery Note (one page, for the customer)", "Small Box Label (thermal/receipt printer, sticks on the box)"],
-                key="pack_print_fmt")
-            fmt = "label" if print_fmt.startswith("Small") else "full"
-            if fmt == "label":
-                st.caption("Designed for narrow thermal/receipt printers (~76mm roll width). If your printer uses a different width, adjust the printer's paper size setting before printing.")
-            st.markdown(delivery_note_html(row, fmt), unsafe_allow_html=True)
-            st.info("Press Ctrl + P (or your printer app's print option). It now prints on a single page/label only — the rest of the screen is hidden automatically.")
-            by = st.text_input("Updated by", value="Packaging", key="pack_by2")
-            if st.button("✅ Packaging Complete → Ready for Dispatch", width='stretch', disabled=not packaging_materials_ready):
-                update_order(row.order_id, {"workflow_status":"Ready for Dispatch", "current_owner":"Dispatch", "next_action":"Assign to delivery run", "packaging_status":"Complete", "packaging_completed_at":now_iso()}, by, "Packaging Complete", "Packaging")
-                create_notification(row.order_id, "Dispatch / Driver", None,
-                                     f"📦 {row.order_id} ({disp(row.get('customer_name'))}) is packaged and ready for a delivery run.")
-                st.rerun()
+            render_packaging_finish_step(row, key_prefix="pack_prog")
     with t3:
         row = select_order(df, "pack_note", "Select any order for delivery note")
         if row is not None:
