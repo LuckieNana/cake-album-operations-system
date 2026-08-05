@@ -2894,18 +2894,29 @@ def render_customer_care():
                 label = f"{cname} — {cphone}" if cphone != "—" else cname
                 customer_options.append(label)
                 customer_lookup[label] = (cname, cphone if cphone != "—" else "")
-    customer_pick = st.selectbox("Customer", sorted(customer_options[1:]) + [customer_options[0]] if len(customer_options) > 1 else customer_options,
+    customer_pick = st.selectbox("Customer", [customer_options[0]] + sorted(customer_options[1:]),
                                   key="nc_customer_pick")
     if customer_pick != "+ New Customer" and customer_pick in customer_lookup:
         prefill_name, prefill_phone = customer_lookup[customer_pick]
     else:
-        prefill_name, prefill_phone = "", ""
+        # A genuinely new customer - restore anything they'd already typed before a window
+        # refresh wiped the in-memory form state, so nobody has to start over.
+        prefill_name = load_draft_field("nc_customer_name")
+        prefill_phone = load_draft_field("nc_customer_phone")
+
+    # A generation counter baked into the widget key - bumped after every successful
+    # submission (see below) - guarantees a genuinely fresh widget afterward, rather
+    # than relying on session_state deletion alone to take effect before the widget
+    # re-renders.
+    gen = st.session_state.get("nc_customer_field_gen", 0)
+    name_key, phone_key = f"nc_customer_name_input_{gen}", f"nc_customer_phone_input_{gen}"
+    a,b = st.columns(2)
+    customer_name = a.text_input("Customer Name *", value=prefill_name, key=name_key,
+                                  on_change=lambda: save_draft_field("nc_customer_name", st.session_state.get(name_key, "")))
+    customer_number = b.text_input("Customer Phone *", value=prefill_phone, key=phone_key,
+                                    on_change=lambda: save_draft_field("nc_customer_phone", st.session_state.get(phone_key, "")))
 
     with st.form("new_order_form", clear_on_submit=True):
-        a,b = st.columns(2)
-        customer_name = a.text_input("Customer Name *", value=prefill_name)
-        customer_number = b.text_input("Customer Phone *", value=prefill_phone)
-
         st.markdown("### Order Type")
         a,b = st.columns(2)
         order_type = a.selectbox("Order Type", ["Normal Order", "Urgent / Abrupt Order"])
@@ -3067,6 +3078,9 @@ def render_customer_care():
                              f"💰 New order {order_id} ({customer_name.strip()}) needs {next_action.lower()}.")
         st.success(f"Order {order_id} created ({order_quantity} unit(s), total UGX {total_price:,.0f}) and sent to Finance."
                    + (" Fulfilled from cookie inventory." if sold_from_inventory == "Yes" else ""))
+        clear_draft_field("nc_customer_name")
+        clear_draft_field("nc_customer_phone")
+        st.session_state["nc_customer_field_gen"] = st.session_state.get("nc_customer_field_gen", 0) + 1
         for k in ("nc_is_bulk", "nc_qty", "nc_price"):
             if k in st.session_state:
                 del st.session_state[k]
@@ -5755,7 +5769,60 @@ def ensure_session_table():
             username TEXT NOT NULL,
             created_at TEXT,
             last_seen_at TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS draft_entries(
+            token_hash TEXT NOT NULL,
+            field_key TEXT NOT NULL,
+            value TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (token_hash, field_key))""")
         conn.commit()
+
+
+def save_draft_field(field_key: str, value: str):
+    """Saves an in-progress, not-yet-submitted field value tied to this browser's session
+    token - so if the window genuinely refreshes mid-entry (not just a normal Streamlit
+    rerun, which already preserves widget state on its own), the typed value survives
+    and nobody has to start over. Silently does nothing if there's no active session
+    token yet (e.g. right at login) - this is a convenience, not something that should
+    ever block the actual form."""
+    token = st.session_state.get("_session_token")
+    if not token:
+        return
+    try:
+        with connect() as conn:
+            conn.execute("""INSERT INTO draft_entries(token_hash, field_key, value, updated_at)
+                            VALUES(?,?,?,?)
+                            ON CONFLICT(token_hash, field_key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+                         (_session_token_hash(token), field_key, value, now_iso()))
+            conn.commit()
+    except Exception:
+        pass
+
+
+def load_draft_field(field_key: str) -> str:
+    token = st.session_state.get("_session_token")
+    if not token:
+        return ""
+    try:
+        with connect() as conn:
+            row = conn.execute("SELECT value FROM draft_entries WHERE token_hash=? AND field_key=?",
+                               (_session_token_hash(token), field_key)).fetchone()
+            return row[0] if row and row[0] else ""
+    except Exception:
+        return ""
+
+
+def clear_draft_field(field_key: str):
+    token = st.session_state.get("_session_token")
+    if not token:
+        return
+    try:
+        with connect() as conn:
+            conn.execute("DELETE FROM draft_entries WHERE token_hash=? AND field_key=?",
+                         (_session_token_hash(token), field_key))
+            conn.commit()
+    except Exception:
+        pass
 
 
 def _session_token_hash(token: str) -> str:
