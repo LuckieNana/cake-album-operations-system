@@ -3408,6 +3408,7 @@ def render_baking():
                         actual_this = a.number_input("Layers actually baked for this cake", min_value=0, step=1,
                                                        value=int(lrow["layers_needed"]), key=f"batch_tick_qty_{lrow['id']}")
                         if b.button("✅ Mark This Cake Baked", key=f"batch_tick_btn_{lrow['id']}", width='stretch'):
+                            pending_notifications = []
                             with connect() as conn:
                                 conn.execute("""UPDATE baking_batch_orders SET baked_status='Baked', actual_layers_baked=?,
                                               baked_at=?, baked_by=? WHERE id=?""",
@@ -3430,8 +3431,10 @@ def render_baking():
                                                  (f"Piler to pick from batch {brow['batch_number']}", lrow["order_id"]))
                                     conn.commit()
                                     piler_for_notif = conn.execute("SELECT piler_assigned, customer_name FROM orders WHERE order_id=?", (lrow["order_id"],)).fetchone()
-                                    create_notification(lrow["order_id"], "Filling / Piling", piler_for_notif[0] if piler_for_notif else None,
-                                                         f"🎂 {lrow['order_id']} ({disp(piler_for_notif[1]) if piler_for_notif else ''}) baked (batch {brow['batch_number']}) and ready to pile.")
+                                    pending_notifications.append((
+                                        lrow["order_id"], "Filling / Piling", piler_for_notif[0] if piler_for_notif else None,
+                                        f"🎂 {lrow['order_id']} ({disp(piler_for_notif[1]) if piler_for_notif else ''}) baked (batch {brow['batch_number']}) and ready to pile."
+                                    ))
                                     st.success(f"{lrow['order_id']} baked and sent straight to Piling.")
                                 else:
                                     st.info(f"{lrow['order_id']} baked in this batch — still waiting on another flavour batch before it can move to Piling.")
@@ -3446,6 +3449,11 @@ def render_baking():
                                                    f"flag this shortfall to Production Planning.")
                                     else:
                                         st.success(f"Batch {brow['batch_number']} fully complete — all cakes baked and moved on.")
+                            # Notifications open their own separate database connection, so they must
+                            # only fire after the connection above has fully closed — calling them
+                            # while it was still open caused a genuine "database is locked" error.
+                            for notif_args in pending_notifications:
+                                create_notification(*notif_args)
                             st.rerun()
                 if not done_in_batch.empty:
                     with st.expander(f"Already baked in this batch ({len(done_in_batch)})"):
@@ -4044,9 +4052,14 @@ def render_dispatch(show_header=True):
                     conn.execute("INSERT INTO delivery_run_orders(run_id, order_id, stop_sequence, delivery_status) VALUES(?,?,?,?)", (run_id, oid, stop, "Planned"))
                     conn.execute("UPDATE orders SET workflow_status=?, current_owner=?, next_action=?, driver_assigned=?, last_updated_at=?, last_updated_by=? WHERE order_id=?", ("Delivery Run Assigned", "Driver", "Start delivery run", driver, now_iso(), by, oid))
                     conn.execute("INSERT INTO audit_logs(order_id, action_type, stage, action_details, performed_by, performed_at) VALUES(?,?,?,?,?,?)", (oid, "Assigned to Delivery Run", "Dispatch", run_id, by, now_iso()))
-                    create_notification(oid, "Dispatch / Driver", driver,
-                                         f"🚚 {oid} assigned to you for delivery run {run_id}.")
                 conn.commit()
+            # Notifications open their own separate database connection, so they must only run
+            # after the transaction above has fully committed and closed — calling them while
+            # this connection still had uncommitted writes open caused a genuine "database is
+            # locked" error, since SQLite doesn't allow two simultaneous writers to the same file.
+            for oid in sequence:
+                create_notification(oid, "Dispatch / Driver", driver,
+                                     f"🚚 {oid} assigned to you for delivery run {run_id}.")
             refresh_data(); st.success(f"Delivery run {run_id} created."); st.rerun()
     st.markdown("### Delivery Runs")
     runs = load_table("delivery_runs")
