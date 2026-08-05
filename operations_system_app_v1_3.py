@@ -272,8 +272,21 @@ def ensure_push_assets():
         print(f"[PUSH] VAPID key generation failed: {e}", flush=True)
 
 
-ensure_push_assets()
-maybe_restart_for_static_serving()
+@st.cache_resource
+def _init_push_assets_once():
+    """Runs ensure_push_assets() and maybe_restart_for_static_serving() exactly once
+    per server process, shared across every user and every rerun. Without this guard,
+    Streamlit re-executes this whole file's top-level code on every single interaction
+    from every logged-in person - which meant these functions were reading and writing
+    several files on disk dozens of times a second under real multi-user load. That
+    file I/O contention is what was causing the server to stop responding in time,
+    which Nginx then reported as a 502 Bad Gateway."""
+    ensure_push_assets()
+    maybe_restart_for_static_serving()
+    return True
+
+
+_init_push_assets_once()
 VAPID_PUBLIC_KEY = (
     VAPID_PUBLIC_KEY_FILE.read_text(encoding="utf-8").strip()
     if VAPID_PUBLIC_KEY_FILE.exists() else None
@@ -5846,12 +5859,23 @@ def restore_session_from_query():
     st.session_state["_session_token"] = token
 
 
-def main():
-    inject_css()
+@st.cache_resource
+def _init_schema_and_roster_once():
+    """Schema migrations and roster bootstrapping only need to happen once when the
+    server starts, not on every rerun from every logged-in person. Same reasoning as
+    _init_push_assets_once() above - repeatedly re-checking table structure under
+    real concurrent, multi-user load adds needless database contention."""
     ensure_release_2_schema()
     ensure_bootstrap_admin()
     ensure_default_staff_roster()
     apply_staff_name_corrections()
+    ensure_session_table()
+    return True
+
+
+def main():
+    inject_css()
+    _init_schema_and_roster_once()
     st.session_state["_idea_widget_calls"] = 0
     st.session_state["_refresh_widget_calls"] = 0
     if "authenticated" not in st.session_state:
@@ -5861,7 +5885,6 @@ def main():
         st.session_state.staff_name = ""
         st.session_state.is_hod = False
         st.session_state.username = ""
-    ensure_session_table()
     restore_session_from_query()
     if st.session_state.authenticated and session_expired():
         delete_app_session(st.session_state.get("_session_token"))
