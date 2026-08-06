@@ -2322,7 +2322,10 @@ def order_card(row, extra=None, show_image=True):
     if disp(row.get("cake_category")) not in ("—", "N/A"):
         html.append(f"<b>Occasion:</b> {disp(row.get('cake_category'))}<br>")
     html.append(qty_html)
-    html.append(f"<b>Flavours:</b> {disp(row.get('flavours'))}<br>{size}")
+    if str(row.get("is_multi_tier")) == "Yes":
+        html.append(f"<b>Centerpiece Flavours:</b> {disp(row.get('flavours'))} <i>— see Tier Breakdown below for each tier's own flavours</i><br>{size}")
+    else:
+        html.append(f"<b>Flavours:</b> {disp(row.get('flavours'))}<br>{size}")
     if ptype == "Cake":
         html.append(f"<b>Layers:</b> {disp(row.get('number_of_layers'))}<br>")
     html.append(f"<b>Design:</b> {disp(row.get('design_description'))}<br>")
@@ -2766,8 +2769,8 @@ def render_customer_care():
     side_cake_details = []
     side_cake_total = 0.0
     if product_type == "Cake":
-        st.markdown("### Wedding / Tier Cake Configuration")
-        is_multi_tier = st.selectbox("Is this a multi-tier cake? (e.g. wedding cake)", ["No", "Yes"], key="nc_multi_tier")
+        st.markdown("### Tier Configuration")
+        is_multi_tier = st.selectbox("Is this a multi-tier cake? (e.g. wedding, birthday, baptism, or any other tiered cake)", ["No", "Yes"], key="nc_multi_tier")
         if is_multi_tier == "Yes":
             tier_count = st.selectbox("Number of full tiers", [2, 3, 4, 5, 6], key="nc_tier_count")
             st.caption("Every full tier must contain at least two flavours and may contain up to four. Enter the pan diameter and finished height in inches.")
@@ -2791,7 +2794,7 @@ def render_customer_care():
                     tier_details.append({"tier": i, "flavours": tier_flavours, "pan_diameter_inches": t_size, "height_inches": t_height, "price": t_price})
                     tier_total += t_price
             st.markdown("### Side Cakes")
-            side_cake_count = st.selectbox("How many side cakes accompany this wedding cake?", list(range(0, 11)), key="nc_side_cake_count")
+            side_cake_count = st.selectbox(f"How many side cakes accompany this {cake_category.lower()} cake?", list(range(0, 11)), key="nc_side_cake_count")
             for i in range(1, int(side_cake_count) + 1):
                 with st.expander(f"Side Cake {i}", expanded=True):
                     flavour_cols = st.columns(4)
@@ -2810,7 +2813,7 @@ def render_customer_care():
                     sc_price = c.number_input("Side-cake price (UGX)", min_value=0, step=5000, key=f"nc_side_{i}_price")
                     side_cake_details.append({"side_cake": i, "flavours": side_flavours, "pan_diameter_inches": sc_size, "height_inches": sc_height, "price": sc_price})
                     side_cake_total += sc_price
-            st.info(f"Full tiers: UGX {tier_total:,.0f} · Side cakes: UGX {side_cake_total:,.0f} · Wedding cake total: UGX {tier_total + side_cake_total:,.0f}")
+            st.info(f"Full tiers: UGX {tier_total:,.0f} · Side cakes: UGX {side_cake_total:,.0f} · {cake_category} cake total: UGX {tier_total + side_cake_total:,.0f}")
 
     sold_from_inventory = "No"
     inventory_batch_id = None
@@ -3107,7 +3110,7 @@ def render_customer_care():
     else:
         day_orders = df_all.iloc[0:0]
     st.caption(f"{len(day_orders)} order(s) entered on {pick_date.strftime('%d %b %Y')}" + (" (showing first 20)" if len(day_orders) == 20 else ""))
-    table(day_orders, ["order_id","product_type","customer_name","order_type","urgency_level","order_quantity","is_bulk_order",
+    table(day_orders, ["order_id","product_type","cake_category","customer_name","order_type","urgency_level","order_quantity","is_bulk_order",
           "price_ugx","balance","payment_arrangement","workflow_status","order_created_at"])
 
 def render_finance():
