@@ -11,6 +11,10 @@ import sqlite3
 import uuid
 import hashlib
 import base64
+import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 import time
 import json
 import re
@@ -1393,6 +1397,9 @@ def ensure_base_schema():
         conn.execute("""CREATE TABLE IF NOT EXISTS push_subscriptions(
             id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, department TEXT,
             endpoint TEXT NOT NULL UNIQUE, subscription_json TEXT NOT NULL, created_at TEXT NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS piler_daily_accountability(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, piler_name TEXT, accountability_date TEXT,
+            item_name TEXT, quantity_used REAL, unit TEXT, recorded_at TEXT)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS order_videos(
             id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, filename TEXT, mime_type TEXT,
             data_base64 TEXT NOT NULL, file_size_bytes INTEGER, uploaded_at TEXT)""")
@@ -1538,7 +1545,11 @@ def ensure_release_2_schema():
             "topper_required": "TEXT DEFAULT 'No'", "topper_wording": "TEXT", "topper_notes": "TEXT",
             "topper_status": "TEXT DEFAULT 'Not Required'", "topper_assigned_to": "TEXT",
             "topper_target_at": "TEXT", "topper_ready_at": "TEXT",
-            "topper_received_by_decorator": "TEXT", "topper_received_at": "TEXT", "topper_pickup_note": "TEXT"
+            "topper_received_by_decorator": "TEXT", "topper_received_at": "TEXT", "topper_pickup_note": "TEXT",
+            "sticker_required": "TEXT DEFAULT 'No'", "sticker_notes": "TEXT",
+            "sticker_status": "TEXT DEFAULT 'Not Required'", "sticker_assigned_to": "TEXT",
+            "sticker_ready_at": "TEXT",
+            "sticker_received_by_decorator": "TEXT", "sticker_received_at": "TEXT", "sticker_pickup_note": "TEXT",
         }
         order_cols_24 = {r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()}
         for name, definition in topper_cols.items():
@@ -1675,7 +1686,7 @@ MATERIAL_VARIANTS = {
 
 STAGE_MATERIALS = {
     "Baking": [
-        "Flour", "Sugar", "Eggs", "Raisins", "Caramel",  # baking-only
+        "Flour", "Sugar", "Eggs", "Raisins", "Caramel", "Mixed Spice", "Nutmeg",  # baking-only
         "Vanilla Extract", "Lemon Emulsion", "Icing Sugar", "Prestige",  # Baking-only (Decor no longer uses these)
         "Glucose", "Milk", "Yogurt", "Cooking Oil", "Soap", "Lemons", "Oranges", "Coconut Cream", "Vinegar",
         "Gypsy", "Kimbo", "Dark Cocoa Powder", "Milk Powder Flavor", "Baking Powder", "Moulds",
@@ -1693,7 +1704,7 @@ STAGE_MATERIALS = {
         "Fondant", "Buttercream", "Waffle Paper", "Ice Cream Cones", "Pearls", "Candles", "Gold Leaves",
         "Flowers", "Balls", "Palm Leaf", "Butterflies", "Crowns", "Topper Paper",
         "Super Glue", "Scissors", "Cutters", "Rolling Pin",
-        "Cake Album Stickers", "Cookie Stickers",
+        "Stickers", "Cake Album Stickers", "Cookie Stickers",
         "Other",
     ],
     "Packaging": ["Cake Boxes", "Wrapping Paper", "Envelopes", "Packing Bags", "Sticker", "Ribbon", "Bag", "Tape", "Other"],
@@ -2681,7 +2692,7 @@ def render_customer_care():
 
     if st.session_state.get("is_hod"):
         with st.expander("👑 HOD: Correct a Wrongly Entered Order"):
-            st.caption("For mistakes made at order entry — wrong name, phone, flavour, price, date, etc. This edits the order in place; it never has to move through the workflow again.")
+            st.caption("For mistakes made at order entry — wrong name, phone, flavour, price, size, date, etc. This edits the order in place; it never has to move through the workflow again.")
             cc_search = st.text_input("Search by Order ID or customer name", key="cc_hod_search")
             if cc_search.strip():
                 s = cc_search.strip().lower()
@@ -2692,7 +2703,8 @@ def render_customer_care():
                 if cc_matches.empty:
                     st.info("No matching orders found.")
                 else:
-                    table(cc_matches, ["order_id", "customer_name", "customer_number", "flavours", "price_ugx", "due_date", "workflow_status"])
+                    table(cc_matches, ["order_id", "customer_name", "customer_number", "flavours", "price_ugx",
+                                        "cake_size_value", "cake_height_inches", "due_date", "workflow_status"])
                     cc_pick = st.selectbox("Select an order to correct", cc_matches["order_id"].tolist(), key="cc_hod_pick")
                     cc_row = cc_matches[cc_matches["order_id"] == cc_pick].iloc[0]
                     a, b = st.columns(2)
@@ -2701,6 +2713,14 @@ def render_customer_care():
                     a, b = st.columns(2)
                     cc_flavours = a.text_input("Flavours", value=disp(cc_row.get("flavours")) if disp(cc_row.get("flavours")) != "—" else "", key="cc_hod_flavours")
                     cc_price = b.number_input("Price (UGX)", min_value=0.0, step=5000.0, value=float(cc_row.get("price_ugx") or 0), key="cc_hod_price")
+                    st.caption("⚠️ Size, height, and shape below are what Production actually plans against — if the client changed the cake size, these must be corrected here too, not just the price.")
+                    a, b, c = st.columns(3)
+                    cc_size = a.number_input("Size (inches)", min_value=0.0, step=0.5, value=float(cc_row.get("cake_size_value") or 0), key="cc_hod_size")
+                    cc_height = b.number_input("Height (inches)", min_value=0.0, step=0.5, value=float(cc_row.get("cake_height_inches") or 0), key="cc_hod_height")
+                    cc_shape = c.selectbox("Shape", ["Round", "Rectangle", "Square", "Heart", "Custom"],
+                                            index=(["Round", "Rectangle", "Square", "Heart", "Custom"].index(cc_row.get("cake_shape"))
+                                                   if cc_row.get("cake_shape") in ["Round", "Rectangle", "Square", "Heart", "Custom"] else 0),
+                                            key="cc_hod_shape")
                     a, b = st.columns(2)
                     cc_location = a.text_input("Delivery / pickup location", value=disp(cc_row.get("location")) if disp(cc_row.get("location")) != "—" else "", key="cc_hod_location")
                     cc_due_date = b.text_input("Due date (YYYY-MM-DD)", value=disp(cc_row.get("due_date")) if disp(cc_row.get("due_date")) != "—" else "", key="cc_hod_due_date")
@@ -2710,10 +2730,14 @@ def render_customer_care():
                         update_order(cc_row["order_id"], {
                             "customer_name": cc_name.strip(), "customer_number": cc_phone.strip(),
                             "flavours": cc_flavours.strip(), "price_ugx": cc_price,
+                            "cake_size_value": cc_size, "cake_height_inches": cc_height, "cake_shape": cc_shape,
                             "location": cc_location.strip(), "due_date": cc_due_date.strip(),
                             "design_description": cc_design.strip(),
                         }, cc_by, "Manual Entry Correction by Customer Care HOD", "Customer Care")
-                        st.success(f"Order {cc_row['order_id']} corrected."); st.rerun()
+                        create_notification(cc_row["order_id"], cc_row.get("current_owner") or "Production Planning", None,
+                                             f"✏️ {cc_row['order_id']} ({cc_name.strip()}) was corrected by Customer Care — "
+                                             f"please re-check size/height/flavours/price before continuing this job.")
+                        st.success(f"Order {cc_row['order_id']} corrected — the department currently holding this job has been notified to double-check it."); st.rerun()
             else:
                 st.caption("Type something above to search.")
 
@@ -2938,8 +2962,12 @@ def render_customer_care():
             topper_required = a.selectbox("Topper Needed?", ["No","Yes"])
             topper_wording = b.text_input("Words on Topper (leave blank if no topper)")
             topper_notes = st.text_area("Topper Style / Design Notes (leave blank if no topper)")
+            st.markdown("### Sticker Requirements")
+            sticker_required = st.selectbox("Does the cake need a sticker?", ["No","Yes"])
+            sticker_notes = st.text_area("Sticker Design Notes (leave blank if no sticker)") if sticker_required == "Yes" else ""
         else:
             topper_required, topper_wording, topper_notes = "No", "", ""
+            sticker_required, sticker_notes = "No", ""
 
         st.markdown("### Delivery Window")
         st.caption("The time range the customer expects delivery within — used by Dispatch/Driver.")
@@ -3062,6 +3090,8 @@ def render_customer_care():
             "topper_required": topper_required, "topper_wording": topper_wording.strip() if topper_required=="Yes" else "",
             "topper_notes": topper_notes.strip() if topper_required=="Yes" else "",
             "topper_status": "Pending Assignment" if topper_required=="Yes" else "Not Required",
+            "sticker_required": sticker_required, "sticker_notes": sticker_notes.strip() if sticker_required=="Yes" else "",
+            "sticker_status": "Pending Assignment" if sticker_required=="Yes" else "Not Required",
             "order_created_at": now_iso(), "last_updated_at": now_iso(), "last_updated_by": created_by.strip(),
         })
         if video_records:
@@ -3576,6 +3606,11 @@ def render_production_planning():
                 target = topper_target_datetime(row)
                 if target is not None:
                     st.warning(f"Topper target: {target.strftime('%Y-%m-%d %I:%M %p')} — 2 hours before cake due time.")
+            sticker_owner = "Doreen"
+            if str(row.get("sticker_required")) == "Yes":
+                st.markdown("### 🏷️ Sticker Assignment")
+                st.caption(f"Sticker notes: {disp(row.get('sticker_notes'))}")
+                sticker_owner = st.text_input("Sticker assigned to", value="Doreen", key="pp_sticker_owner")
         if st.button("Assign Full Production Team", width='stretch'):
             piler_val = ", ".join(piler) if isinstance(piler, list) else piler
             coverer_val = ", ".join(coverer) if isinstance(coverer, list) else coverer
@@ -3615,6 +3650,13 @@ def render_production_planning():
                 }, by, "Topper Assigned", "Production Planning")
                 create_notification(row.order_id,"Design & Innovation",topper_owner,
                                     f"New topper assignment. Words: {disp(row.get('topper_wording'))}. Decorator: {decorator_val}.")
+            if str(row.get("sticker_required")) == "Yes":
+                update_order(row.order_id, {
+                    "sticker_assigned_to":sticker_owner, "sticker_status":"Assigned",
+                    "sticker_pickup_note":f"Sticker assigned to {sticker_owner}"
+                }, by, "Sticker Assigned", "Production Planning")
+                create_notification(row.order_id,"Design & Innovation",sticker_owner,
+                                    f"🏷️ New sticker assignment for {row.order_id}. Notes: {disp(row.get('sticker_notes'))}. Decorator: {decorator_val}.")
             st.success("Production team assigned."); st.rerun()
 
     st.divider()
@@ -3854,8 +3896,8 @@ def render_baking():
     page_header("🍰 Baking", "Bake layers, submit for baking check, and correct rejected cakes.")
     df = load_orders()
     render_hod_overview("Baking", df)
-    tab_batch, tab_assigned, tab_progress, tab_correction, tab_cakeinv, tab_cookieinv, tab_oven = st.tabs(
-        ["🧮 Batch Board", "Assigned", "In Progress", "Correction Required", "Baked Cake Inventory", "🍪 Baked Cookie Inventory", "🌡️ Oven Log"])
+    tab_batch, tab_assigned, tab_progress, tab_correction, tab_cakeinv, tab_cookieinv, tab_oven, tab_finished = st.tabs(
+        ["🧮 Batch Board", "Assigned", "In Progress", "Correction Required", "Baked Cake Inventory", "🍪 Baked Cookie Inventory", "🌡️ Oven Log", "✅ Finished Work"])
     with tab_assigned:
         assigned_q = filter_orders(df,["Production Planned"])
         assigned_q = assigned_q[assigned_q["baking_batch_number"].isna() | (assigned_q["baking_batch_number"] == "")] if not assigned_q.empty and "baking_batch_number" in assigned_q.columns else assigned_q
@@ -4262,12 +4304,16 @@ def render_baking():
                         st.caption("These sit in the 'Correction Required' tab. Once corrected they come back onto this board.")
                         table(issue_in_batch, ["order_id", "layers_needed", "baked_at", "baked_by"])
 
+    with tab_finished:
+        render_finished_work_tab("Baking")
+
 
 def render_piling():
     page_header("🎂 Filling / Piling", "Accept baked cakes, pile to correct height, and send to Covering.")
     df = load_orders()
     render_hod_overview("Filling / Piling", df)
-    t0,t1,t2,t3,t4 = st.tabs(["📅 Incoming Workload", "Incoming from Baking", "In Progress", "Correction Required", "End-of-Day Layer Reconciliation"])
+    t0,t1,t2,t3,t4,t5,t6 = st.tabs(["📅 Incoming Workload", "Incoming from Baking", "In Progress", "Correction Required",
+                                  "End-of-Day Layer Reconciliation", "📋 End-of-Day Accountability", "✅ Finished Work"])
     with t0:
         pre_piling_statuses = ["Production Planned", "Baking", "Baking Correction Required"]
         render_incoming_workload_forecast(df, "piler_assigned", "Piler", pre_piling_statuses, "Incoming from Baking")
@@ -4281,8 +4327,7 @@ def render_piling():
             if not may_act:
                 st.info(f"👀 Viewing only — this job is assigned to **{first_name(row.get('piler_assigned'))}**.")
             piling_materials_ready = render_stage_material_planning("Filling / Piling", row, row.get("piler_assigned"))
-            if not piling_materials_ready:
-                st.warning("Enter piling materials before accepting and starting this job.")
+            st.caption("Logging materials here is optional per cake — you can also account for everything used today in one go at the end of your shift, in the \"📋 End-of-Day Accountability\" tab.")
             by = st.text_input("Checked by", value=disp(row.get("piler_assigned")) if disp(row.get("piler_assigned")) != "—" else st.session_state.get("staff_name",""), key="pile_by1")
             a,b = st.columns(2)
             if disp(row.get("inventory_reservation_id")) != "—":
@@ -4293,7 +4338,7 @@ def render_piling():
             else:
                 layers_used = None
                 layer_notes = ""
-            if a.button("✅ Accept for Piling", width='stretch', disabled=(not may_act or not piling_materials_ready)):
+            if a.button("✅ Accept for Piling", width='stretch', disabled=not may_act):
                 if disp(row.get("inventory_reservation_id")) != "—":
                     record_layer_usage(int(row.get("inventory_reservation_id")), row.order_id, "Filling / Piling", int(layers_used), by, layer_notes)
                 insert_stage_check(row.order_id,"Baking","Piling",by,"Passed")
@@ -4314,10 +4359,9 @@ def render_piling():
             _,_pilers_ma,_,_,_ = staff_lists()
             render_multi_assign(row, "piler_assigned", "Piler", _pilers_ma, f"pile_{row.order_id}")
             piling_materials_ready = render_stage_material_planning("Filling / Piling", row, row.get("piler_assigned"))
-            if not piling_materials_ready:
-                st.warning("Record piling materials before completing this job.")
+            st.caption("Optional here too — account for the day's materials all at once in \"📋 End-of-Day Accountability\" if that's easier.")
             by = st.text_input("Updated by", value=disp(row.get("piler_assigned")), key="pile_by2")
-            if st.button("✅ Piling Complete → Send to Covering Check", width='stretch', disabled=(not may_act or not piling_materials_ready)):
+            if st.button("✅ Piling Complete → Send to Covering Check", width='stretch', disabled=not may_act):
                 update_order(row.order_id, {"workflow_status":"Covering Incoming", "current_owner":"Coating / Covering", "next_action":"Coverer to check piling and accept"}, by, "Piling Submitted", "Piling")
                 create_notification(row.order_id, "Coating / Covering", row.get("coverer_assigned"),
                                      f"🎂 {row.order_id} ({disp(row.get('customer_name'))}) has finished piling and is ready to cover.")
@@ -4364,12 +4408,56 @@ def render_piling():
         table(rec.sort_values("confirmed_at", ascending=False).head(20) if not rec.empty else rec,
               ["reconciliation_date","confirmed_by","opening_layers","layers_used","closing_layers","procurement_balance","comments","confirmed_at"])
 
+    with t5:
+        st.markdown("### 📋 End-of-Day Accountability")
+        st.caption("Since measuring isn't required per cake anymore, use this at the end of your shift to account for everything "
+                   "used across all the cakes you piled today — cake boards, buttercream, or anything else drawn from stores.")
+        acc_by = st.text_input("Piler name", value=st.session_state.get("staff_name", ""), key="pile_acc_by")
+        acc_date = st.date_input("Date", value=date.today(), key="pile_acc_date")
+        st.markdown("#### Add an item")
+        a, b, c = st.columns(3)
+        acc_item = a.selectbox("Item", STAGE_MATERIALS.get("Filling / Piling", ["Other"]), key="pile_acc_item")
+        if acc_item == "Other":
+            acc_item = a.text_input("Specify item", key="pile_acc_item_other")
+        acc_qty = b.number_input("Quantity used today", min_value=0.0, step=1.0, key="pile_acc_qty")
+        acc_unit = c.selectbox("Unit", ["pieces", "kg", "grams", "litres", "ml", "trays", "boxes"], key="pile_acc_unit")
+        if st.button("➕ Add to Today's Accountability", key="pile_acc_add", width='stretch'):
+            if acc_item and acc_qty > 0:
+                with connect() as conn:
+                    conn.execute("""INSERT INTO piler_daily_accountability(piler_name, accountability_date, item_name,
+                                    quantity_used, unit, recorded_at) VALUES(?,?,?,?,?,?)""",
+                                 (acc_by, str(acc_date), acc_item, acc_qty, acc_unit, now_iso()))
+                    conn.commit()
+                st.success(f"Added {acc_qty:g} {acc_unit} of {acc_item} for {acc_date}.")
+                st.rerun()
+            else:
+                st.error("Pick an item and enter a quantity greater than zero.")
+        st.markdown(f"#### {acc_by or 'Your'} accountability for {acc_date.strftime('%d %b %Y')}")
+        acc_records = load_table("piler_daily_accountability")
+        if not acc_records.empty:
+            today_mine = acc_records[(acc_records["piler_name"] == acc_by) & (acc_records["accountability_date"] == str(acc_date))]
+        else:
+            today_mine = acc_records
+        table(today_mine.sort_values("recorded_at", ascending=False) if not today_mine.empty else today_mine,
+              ["item_name", "quantity_used", "unit", "recorded_at"])
+        st.markdown("#### 👑 HOD view — everyone's accountability for a chosen day")
+        if st.session_state.get("is_hod"):
+            hod_acc_date = st.date_input("Day to review", value=date.today(), key="pile_acc_hod_date")
+            all_for_day = acc_records[acc_records["accountability_date"] == str(hod_acc_date)] if not acc_records.empty else acc_records
+            table(all_for_day.sort_values(["piler_name", "recorded_at"]) if not all_for_day.empty else all_for_day,
+                  ["piler_name", "item_name", "quantity_used", "unit", "recorded_at"])
+        else:
+            st.caption("Visible to your Head of Department.")
+
+    with t6:
+        render_finished_work_tab("Filling / Piling")
+
 
 def render_covering():
     page_header("🧁 Coating / Covering", "Check piling/height, cover cake, then send to Decoration.")
     df = load_orders()
     render_hod_overview("Coating / Covering", df)
-    t0,t1,t2,t3 = st.tabs(["📅 Incoming Workload", "Incoming from Piling", "In Progress", "Correction Required"])
+    t0,t1,t2,t3,t4 = st.tabs(["📅 Incoming Workload", "Incoming from Piling", "In Progress", "Correction Required", "✅ Finished Work"])
     with t0:
         pre_covering_statuses = ["Production Planned", "Baking", "Baking Correction Required",
                                   "Piling Incoming", "Piling", "Piling Correction Required"]
@@ -4438,6 +4526,9 @@ def render_covering():
                 update_order(row.order_id, {"workflow_status":"Decorating Incoming", "current_owner":"Decoration", "next_action":"Resubmitted for decorator acceptance"}, by, "Covering Correction Complete", "Covering")
                 st.rerun()
 
+    with t4:
+        render_finished_work_tab("Coating / Covering")
+
 
 def render_design_innovation():
     page_header("🎨 Design & Innovation", "Keith's topper queue, automatically prioritized by topper target time.")
@@ -4469,35 +4560,88 @@ def render_design_innovation():
     df=load_orders()
     q=df[col(df,"topper_required")=="Yes"].copy()
     if q.empty:
-        st.info("No topper tasks."); return
-    q["topper_urgency"]=q.apply(topper_urgency,axis=1)
-    q["topper_target_display"]=q.apply(lambda r: topper_target_datetime(r).strftime("%Y-%m-%d %I:%M %p") if topper_target_datetime(r) is not None else "—",axis=1)
-    rank={"⚠️ DELAYED / OVERDUE":0,"🚨 DUE NOW":1,"🟡 DUE SOON":2,"🟢 NORMAL TIME":3,"Completed":4}
-    q["_rank"]=q["topper_urgency"].map(rank).fillna(9)
-    q=q.sort_values(["_rank","due_date","expected_time"])
-    a,b,c,d=st.columns(4)
-    a.metric("Delayed",int((q["topper_urgency"]=="⚠️ DELAYED / OVERDUE").sum()))
-    b.metric("Due Now",int((q["topper_urgency"]=="🚨 DUE NOW").sum()))
-    c.metric("Due Soon",int((q["topper_urgency"]=="🟡 DUE SOON").sum()))
-    d.metric("Normal Time",int((q["topper_urgency"]=="🟢 NORMAL TIME").sum()))
-    st.markdown("### Topper Priority Queue")
-    st.dataframe(q[["topper_urgency","order_id","customer_name","topper_wording","decorator_assigned","due_date","expected_time","topper_target_display","topper_status","topper_assigned_to"]],hide_index=True,width='stretch')
-    active=q[~q["topper_status"].isin(["Ready","Received by Decorator"])]
-    row=select_order(active,"topper_task") if not active.empty else None
-    if row is None:
-        st.success("All topper tasks are completed."); return
-    order_card(row,[("Topper Words",row.get("topper_wording")),("Topper Notes",row.get("topper_notes")),("Decorator",row.get("decorator_assigned")),("Urgency",topper_urgency(row)),("Status",row.get("topper_status"))])
-    render_stage_material_planning("Design & Innovation", row, row.get("topper_assigned_to"))
-    by=st.text_input("Updated by",value=disp(row.get("topper_assigned_to")) if disp(row.get("topper_assigned_to"))!="—" else "Keith")
-    a,b=st.columns(2)
-    if a.button("🎨 Start Topper",width='stretch'):
-        update_order(row.order_id,{"topper_status":"In Progress"},by,"Topper Started","Design & Innovation"); st.rerun()
-    if b.button("✅ Topper Ready",width='stretch'):
-        decorator=disp(row.get("decorator_assigned"))
-        message=f"🎨 Your cake topper is ready for order {row.order_id} ({disp(row.get('customer_name'))}) — pick it up from {by}."
-        update_order(row.order_id,{"topper_status":"Ready","topper_ready_at":now_iso(),"topper_pickup_note":message},by,"Topper Ready","Design & Innovation")
-        create_notification(row.order_id,"Decoration",decorator,message)
-        st.success(f"Topper ready. {decorator} notified."); st.rerun()
+        st.info("No topper tasks.")
+    else:
+        q["topper_urgency"]=q.apply(topper_urgency,axis=1)
+        q["topper_target_display"]=q.apply(lambda r: topper_target_datetime(r).strftime("%Y-%m-%d %I:%M %p") if topper_target_datetime(r) is not None else "—",axis=1)
+        rank={"⚠️ DELAYED / OVERDUE":0,"🚨 DUE NOW":1,"🟡 DUE SOON":2,"🟢 NORMAL TIME":3,"Completed":4}
+        q["_rank"]=q["topper_urgency"].map(rank).fillna(9)
+        q=q.sort_values(["_rank","due_date","expected_time"])
+        a,b,c,d=st.columns(4)
+        a.metric("Delayed",int((q["topper_urgency"]=="⚠️ DELAYED / OVERDUE").sum()))
+        b.metric("Due Now",int((q["topper_urgency"]=="🚨 DUE NOW").sum()))
+        c.metric("Due Soon",int((q["topper_urgency"]=="🟡 DUE SOON").sum()))
+        d.metric("Normal Time",int((q["topper_urgency"]=="🟢 NORMAL TIME").sum()))
+        st.markdown("### Topper Priority Queue")
+        st.dataframe(q[["topper_urgency","order_id","customer_name","topper_wording","decorator_assigned","due_date","expected_time","topper_target_display","topper_status","topper_assigned_to"]],hide_index=True,width='stretch')
+        active=q[~q["topper_status"].isin(["Ready","Received by Decorator"])]
+        row=select_order(active,"topper_task") if not active.empty else None
+        if row is None:
+            st.success("All topper tasks are completed.")
+        else:
+            order_card(row,[("Topper Words",row.get("topper_wording")),("Topper Notes",row.get("topper_notes")),("Decorator",row.get("decorator_assigned")),("Urgency",topper_urgency(row)),("Status",row.get("topper_status"))])
+            render_stage_material_planning("Design & Innovation", row, row.get("topper_assigned_to"))
+            by=st.text_input("Updated by",value=disp(row.get("topper_assigned_to")) if disp(row.get("topper_assigned_to"))!="—" else "Keith")
+            a,b=st.columns(2)
+            if a.button("🎨 Start Topper",width='stretch'):
+                update_order(row.order_id,{"topper_status":"In Progress"},by,"Topper Started","Design & Innovation"); st.rerun()
+            if b.button("✅ Topper Ready",width='stretch'):
+                decorator=disp(row.get("decorator_assigned"))
+                message=f"🎨 Your cake topper is ready for order {row.order_id} ({disp(row.get('customer_name'))}) — pick it up from {by}."
+                update_order(row.order_id,{"topper_status":"Ready","topper_ready_at":now_iso(),"topper_pickup_note":message},by,"Topper Ready","Design & Innovation")
+                create_notification(row.order_id,"Decoration",decorator,message)
+                st.success(f"Topper ready. {decorator} notified."); st.rerun()
+
+    st.divider()
+    sq = df[col(df,"sticker_required")=="Yes"].copy()
+    if sq.empty:
+        st.info("No sticker tasks.")
+    else:
+        st.markdown("### 🏷️ Sticker Priority Queue")
+        sq_active = sq[~sq["sticker_status"].isin(["Ready", "Received by Decorator"])]
+        st.dataframe(sq[["order_id","customer_name","sticker_notes","decorator_assigned","due_date","expected_time","sticker_status","sticker_assigned_to"]],
+                     hide_index=True, width='stretch')
+        srow = select_order(sq_active, "sticker_task") if not sq_active.empty else None
+        if srow is None:
+            st.success("All sticker tasks are completed.")
+        else:
+            order_card(srow, [("Sticker Notes", srow.get("sticker_notes")), ("Decorator", srow.get("decorator_assigned")), ("Status", srow.get("sticker_status"))])
+            render_stage_material_planning("Design & Innovation", srow, srow.get("sticker_assigned_to"))
+            sby = st.text_input("Updated by", value=disp(srow.get("sticker_assigned_to")) if disp(srow.get("sticker_assigned_to")) != "—" else "Doreen", key="sticker_updated_by")
+            sa, sb = st.columns(2)
+            if sa.button("🏷️ Start Sticker", width='stretch'):
+                update_order(srow.order_id, {"sticker_status":"In Progress"}, sby, "Sticker Started", "Design & Innovation"); st.rerun()
+            if sb.button("✅ Sticker Ready", width='stretch'):
+                sdecorator = disp(srow.get("decorator_assigned"))
+                smessage = f"🏷️ The sticker is ready for order {srow.order_id} ({disp(srow.get('customer_name'))}) — pick it up from {sby}."
+                update_order(srow.order_id, {"sticker_status":"Ready", "sticker_ready_at":now_iso(), "sticker_pickup_note":smessage}, sby, "Sticker Ready", "Design & Innovation")
+                create_notification(srow.order_id, "Decoration", sdecorator, smessage)
+                st.success(f"Sticker ready. {sdecorator} notified."); st.rerun()
+
+    st.divider()
+    st.markdown("### 📋 Sent Work — Toppers")
+    st.caption("Every topper sent out, when it was sent, who it went to, and whether they've acknowledged picking it up.")
+    tsent = df[df["topper_status"].isin(["Ready", "Received by Decorator"])].copy() if not df.empty else df
+    if tsent.empty:
+        st.info("No toppers sent yet.")
+    else:
+        tsent["Acknowledged?"] = tsent["topper_status"].apply(lambda s: "✅ Yes" if s == "Received by Decorator" else "⏳ Not yet")
+        tsent = tsent.rename(columns={"topper_ready_at": "Sent At", "decorator_assigned": "Sent To",
+                                       "topper_received_by_decorator": "Acknowledged By", "topper_received_at": "Acknowledged At"})
+        table(tsent.sort_values("Sent At", ascending=False),
+              ["order_id", "customer_name", "Sent At", "Sent To", "Acknowledged?", "Acknowledged By", "Acknowledged At"])
+
+    st.markdown("### 📋 Sent Work — Stickers")
+    st.caption("Same idea for stickers — when each was sent, to whom, and whether it's been acknowledged.")
+    ssent = df[df["sticker_status"].isin(["Ready", "Received by Decorator"])].copy() if not df.empty else df
+    if ssent.empty:
+        st.info("No stickers sent yet.")
+    else:
+        ssent["Acknowledged?"] = ssent["sticker_status"].apply(lambda s: "✅ Yes" if s == "Received by Decorator" else "⏳ Not yet")
+        ssent = ssent.rename(columns={"sticker_ready_at": "Sent At", "decorator_assigned": "Sent To",
+                                       "sticker_received_by_decorator": "Acknowledged By", "sticker_received_at": "Acknowledged At"})
+        table(ssent.sort_values("Sent At", ascending=False),
+              ["order_id", "customer_name", "Sent At", "Sent To", "Acknowledged?", "Acknowledged By", "Acknowledged At"])
 
 
 MINUTES_DECORATION_DEFAULT = 30   # default minimum decoration time
@@ -4514,20 +4658,58 @@ def decoration_minimum_minutes(row):
     return MINUTES_DECORATION_DEFAULT
 
 
+def render_finished_work_tab(department_label, staff_column=None):
+    """Shows what's actually been finished — for the logged-in person by default, or the
+    whole department for an HOD — searchable by day or by the current week. Built on the
+    audit log that every update_order() call already writes to, so this needed no new
+    tracking anywhere else. Once work moves off someone's active queue they lose sight of
+    it entirely otherwise; this is what gives that visibility back."""
+    st.markdown("### ✅ Finished Work")
+    logs = load_table("audit_logs")
+    orders = load_orders()
+    if logs.empty:
+        st.info("Nothing logged yet.")
+        return
+    logs = logs.copy()
+    logs["performed_date"] = pd.to_datetime(logs["performed_at"], errors="coerce").dt.date
+    is_hod = st.session_state.get("is_hod")
+    my_name = st.session_state.get("staff_name", "").strip()
+    view_mode = st.radio("Show", (["My work", "Whole department"] if is_hod else ["My work"]),
+                          horizontal=True, key=f"finwork_view_{department_label}")
+    if view_mode == "My work" and my_name:
+        logs = logs[logs["performed_by"].astype(str).str.strip().str.lower() == my_name.lower()]
+    range_mode = st.radio("Range", ["This week", "Pick a date"], horizontal=True, key=f"finwork_range_{department_label}")
+    if range_mode == "This week":
+        start_of_week = date.today() - timedelta(days=date.today().weekday())
+        logs = logs[logs["performed_date"] >= start_of_week]
+        st.caption(f"Showing {start_of_week.strftime('%A %d %b')} through today. Clears automatically once next week starts.")
+    else:
+        picked = st.date_input("Date", value=date.today(), key=f"finwork_date_{department_label}")
+        logs = logs[logs["performed_date"] == picked]
+    if logs.empty:
+        st.info("No finished work in this range.")
+        return
+    merged = logs.merge(orders[["order_id", "customer_name", "product_type", "flavours"]] if not orders.empty else pd.DataFrame(columns=["order_id"]),
+                         on="order_id", how="left")
+    merged = merged.sort_values("performed_at", ascending=False)
+    st.caption(f"{len(merged)} action(s) in this range.")
+    table(merged, ["performed_at", "order_id", "customer_name", "product_type", "flavours", "action_type", "performed_by"])
+
+
 def render_incoming_workload_forecast(df, staff_column, role_label, pre_stage_statuses, next_stage_label):
-    """Shows everyone assigned-but-not-yet-arrived work for a given role, so the whole
-    department can see what's coming (not just what's already sitting at their door).
-    Pure view-only — no action buttons here."""
+    """Shows the whole department everything still earlier in the pipeline for this role -
+    whether or not a specific person has been named yet. The point is visibility as soon as
+    a cake leaves Production Planning, so the department can prepare (pull items from
+    Procurement, plan the day) well before it physically arrives. Pure view-only - no action
+    buttons here."""
     st.markdown("### What's Coming Our Way")
-    st.caption(f"Every cake already assigned to a {role_label.lower()}, wherever it currently sits earlier in the pipeline, "
-               f"so the whole department can see the workload coming, not just what's already sitting at our door. "
-               f"This is view-only — you can only work on a cake once it actually reaches '{next_stage_label}'.")
-    upcoming = df[
-        (df["workflow_status"].isin(pre_stage_statuses)) &
-        (df[staff_column].notna()) & (df[staff_column] != "")
-    ] if not df.empty and staff_column in df.columns else df.iloc[0:0]
+    st.caption(f"Every cake already on its way to {role_label.lower()}s, wherever it currently sits earlier in the pipeline — "
+               f"shown to the whole department as soon as it leaves Production Planning, whether or not a specific "
+               f"{role_label.lower()} has been named yet. This is view-only — you can only work on a cake once it "
+               f"actually reaches '{next_stage_label}'.")
+    upcoming = df[df["workflow_status"].isin(pre_stage_statuses)] if not df.empty else df.iloc[0:0]
     if upcoming.empty:
-        st.info("Nothing assigned to us yet that's still earlier in the pipeline.")
+        st.info("Nothing coming yet that's still earlier in the pipeline.")
     else:
         counts_by_day = upcoming.groupby("due_date").size().reset_index(name="count").sort_values("due_date")
         cols = st.columns(min(len(counts_by_day), 6) or 1)
@@ -4544,7 +4726,7 @@ def render_decoration():
     page_header("🎨 Decoration", "Accept covering, receive topper handoffs, decorate, and send to Studio.")
     df = load_orders()
     render_hod_overview("Decoration", df)
-    t0,t1,t3,t4 = st.tabs(["📅 Incoming Workload", "Incoming from Covering", "Decorating", "Correction Required"])
+    t0,t1,t3,t4,t5 = st.tabs(["📅 Incoming Workload", "Incoming from Covering", "Decorating", "Correction Required", "✅ Finished Work"])
     with t0:
         pre_decoration_statuses = ["Production Planned", "Baking", "Baking Correction Required",
                                     "Piling Incoming", "Piling", "Piling Correction Required",
@@ -4608,6 +4790,19 @@ def render_decoration():
                     st.success(f"Topper received by {disp(row.get('topper_received_by_decorator'))}.")
                 else:
                     st.warning(f"TOPPER STATUS: {disp(row.get('topper_status'))} — follow up with {disp(row.get('topper_assigned_to'))}.")
+            if str(row.get("sticker_required")) == "Yes":
+                st.markdown("### 🏷️ Sticker Handoff")
+                if str(row.get("sticker_status")) == "Ready":
+                    st.success(f"STICKER READY — {disp(row.get('sticker_pickup_note'))}")
+                    st.write(f"**Sticker notes:** {disp(row.get('sticker_notes'))}")
+                    sticker_receiver=st.text_input("Decorator receiving sticker",value=disp(row.get("decorator_assigned")),key="sticker_receiver")
+                    if st.button("Confirm Sticker Picked",width='stretch',key="sticker_received_btn", disabled=not may_act):
+                        update_order(row.order_id,{"sticker_status":"Received by Decorator","sticker_received_by_decorator":sticker_receiver,"sticker_received_at":now_iso(),"sticker_pickup_note":"Sticker received by assigned decorator"},sticker_receiver,"Sticker Received","Decoration")
+                        st.rerun()
+                elif str(row.get("sticker_status")) == "Received by Decorator":
+                    st.success(f"Sticker received by {disp(row.get('sticker_received_by_decorator'))}.")
+                else:
+                    st.warning(f"STICKER STATUS: {disp(row.get('sticker_status'))} — follow up with {disp(row.get('sticker_assigned_to'))}.")
             decoration_materials_ready = render_stage_material_planning("Decoration", row, row.get("decorator_assigned"))
             if not decoration_materials_ready:
                 st.warning("Record materials before completing Decoration.")
@@ -4630,13 +4825,16 @@ def render_decoration():
                 update_order(row.order_id, {"workflow_status":"Studio Check", "current_owner":"Studio / Final QC", "next_action":"Resubmitted for Studio check"}, by, "Decoration Correction Complete", "Decoration")
                 st.rerun()
 
+    with t5:
+        render_finished_work_tab("Decoration")
+
 
 def render_studio_qc():
     page_header("🔍 Final QC & Packaging", "One continuous platform: final quality control, packaging, delivery notes, and dispatch planning.")
     df = load_orders()
     render_hod_overview("Studio / Final QC", df)
-    qc_tab, packaging_tab, dispatch_tab = st.tabs(
-        ["Final QC", "Packaging & Delivery Notes", "Dispatch Planning"])
+    qc_tab, packaging_tab, dispatch_tab, finished_tab = st.tabs(
+        ["Final QC", "Packaging & Delivery Notes", "Dispatch Planning", "✅ Finished Work"])
     with qc_tab:
         check_q = filter_orders(df,["Studio Check"])
         render_queue_table(check_q, "Cakes Awaiting Final QC", ["decorator_assigned"])
@@ -4657,6 +4855,8 @@ def render_studio_qc():
         render_packaging(show_header=False)
     with dispatch_tab:
         render_dispatch(show_header=False)
+    with finished_tab:
+        render_finished_work_tab("Studio / Final QC")
 
 
 def render_procurement():
@@ -4780,7 +4980,7 @@ def render_packaging(show_header=True):
         page_header("📦 Packaging", "Pack cake, print simple delivery note, and send to Dispatch.")
     df = load_orders()
     render_hod_overview("Packaging", df)
-    t1,t2,t3 = st.tabs(["Ready for Packaging", "Packaging", "Delivery Note"])
+    t1,t2,t3,t4 = st.tabs(["Ready for Packaging", "Packaging", "Delivery Note", "✅ Finished Work"])
     with t1:
         ready_q = filter_orders(df,["Ready for Packaging"])
         render_queue_table(ready_q, "Cakes Ready For Packaging")
@@ -4823,6 +5023,9 @@ def render_packaging(show_header=True):
                 key="pack_print_fmt2")
             fmt2 = "label" if print_fmt2.startswith("Small") else "full"
             st.markdown(delivery_note_html(row, fmt2), unsafe_allow_html=True)
+
+    with t4:
+        render_finished_work_tab("Packaging")
 
 
 def render_dispatch(show_header=True):
@@ -5518,6 +5721,107 @@ def _subscription_json_for(endpoint: str):
     return row[0] if row else None
 
 
+def build_daily_report_html(report_date=None):
+    """Builds the daily report as HTML: today's sales, pending balances, and drivers still
+    holding unreconciled cash from the field. Returns (html, summary_dict) - the summary is
+    used both in the email subject line and to show a quick preview in the app before sending."""
+    report_date = report_date or date.today()
+    df = load_orders()
+    day_str = report_date.strftime("%Y-%m-%d")
+
+    day_orders = df[pd.to_datetime(df["order_created_at"], errors="coerce").dt.date == report_date] if not df.empty else df.iloc[0:0]
+    total_sales = float(pd.to_numeric(day_orders["price_ugx"], errors="coerce").fillna(0).sum()) if not day_orders.empty else 0.0
+
+    pending_balance_orders = df[pd.to_numeric(df.get("balance"), errors="coerce").fillna(0) > 0] if not df.empty and "balance" in df.columns else df.iloc[0:0]
+    total_pending = float(pd.to_numeric(pending_balance_orders.get("balance"), errors="coerce").fillna(0).sum()) if not pending_balance_orders.empty else 0.0
+
+    unreconciled = df[df.get("cash_cleared_status") == "Pending Physical Handover"] if not df.empty and "cash_cleared_status" in df.columns else df.iloc[0:0]
+    unreconciled_total = float(pd.to_numeric(unreconciled.get("balance"), errors="coerce").fillna(0).sum()) if not unreconciled.empty else 0.0
+
+    def df_to_html_table(d, cols, empty_msg):
+        if d.empty:
+            return f"<p style='color:#666'>{empty_msg}</p>"
+        rows = "".join(
+            "<tr>" + "".join(f"<td style='padding:4px 8px;border:1px solid #ddd'>{disp(r.get(c))}</td>" for c in cols) + "</tr>"
+            for _, r in d.iterrows()
+        )
+        header = "".join(f"<th style='padding:4px 8px;border:1px solid #ddd;background:#F0E6F5;text-align:left'>{c}</th>" for c in cols)
+        return f"<table style='border-collapse:collapse;width:100%;font-size:13px'><tr>{header}</tr>{rows}</table>"
+
+    sales_html = df_to_html_table(day_orders, ["order_id", "customer_name", "product_type", "cake_category", "price_ugx", "payment_method"],
+                                   "No orders entered today.")
+    balances_html = df_to_html_table(pending_balance_orders, ["order_id", "customer_name", "balance", "due_date", "workflow_status"],
+                                      "No orders with a pending balance.")
+    driver_summary = (unreconciled.groupby("driver_assigned")["balance"].sum().reset_index()
+                       if not unreconciled.empty and "driver_assigned" in unreconciled.columns else pd.DataFrame(columns=["driver_assigned", "balance"]))
+    drivers_html = df_to_html_table(driver_summary, ["driver_assigned", "balance"], "No drivers currently holding unreconciled cash.")
+
+    html = f"""
+    <div style="font-family:sans-serif;color:#1A1420;max-width:800px">
+    <h2 style="color:#4B2A5C">Cake Album — Daily Report for {day_str}</h2>
+    <h3>💰 Today's Sales — Total: {fmt_ugx(total_sales)} ({len(day_orders)} order(s))</h3>
+    {sales_html}
+    <h3 style="margin-top:24px">⏳ Pending Balances — Total Owed: {fmt_ugx(total_pending)} ({len(pending_balance_orders)} order(s))</h3>
+    {balances_html}
+    <h3 style="margin-top:24px">🚚 Drivers Not Yet Reconciled — Total: {fmt_ugx(unreconciled_total)}</h3>
+    {drivers_html}
+    <p style="margin-top:24px;color:#999;font-size:12px">Generated automatically by Cake Album Operations.</p>
+    </div>
+    """
+    summary = {"date": day_str, "sales_count": len(day_orders), "total_sales": total_sales,
+               "pending_count": len(pending_balance_orders), "total_pending": total_pending,
+               "unreconciled_drivers": len(driver_summary), "unreconciled_total": unreconciled_total}
+    return html, summary
+
+
+def send_daily_report_email(to_address="cakealbum@gmail.com", report_date=None):
+    """Sends the daily report via SMTP. Reads credentials from environment variables
+    (SMTP_EMAIL / SMTP_APP_PASSWORD) rather than storing them in code. Returns (success, message)
+    so the caller can show a clear result either way, instead of failing silently."""
+    smtp_email = os.environ.get("SMTP_EMAIL")
+    smtp_password = os.environ.get("SMTP_APP_PASSWORD")
+    if not smtp_email or not smtp_password:
+        return False, ("Email isn't set up yet on this server — SMTP_EMAIL and SMTP_APP_PASSWORD "
+                        "environment variables aren't set. See the setup guide.")
+    html, summary = build_daily_report_html(report_date)
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Cake Album Daily Report — {summary['date']} — Sales {fmt_ugx(summary['total_sales'])}"
+    msg["From"] = smtp_email
+    msg["To"] = to_address
+    msg.attach(MIMEText(html, "html"))
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
+            server.starttls()
+            server.login(smtp_email, smtp_password)
+            server.sendmail(smtp_email, [to_address], msg.as_string())
+        return True, f"Report sent to {to_address}."
+    except Exception as e:
+        return False, f"Failed to send: {type(e).__name__}: {e}"
+
+
+def render_daily_report_panel():
+    st.markdown("## 📧 Daily Report Email")
+    st.caption("Today's sales, pending balances, and drivers still holding unreconciled cash — sent as one email.")
+    report_date = st.date_input("Report date", value=date.today(), key="daily_report_date")
+    to_addr = st.text_input("Send to", value="cakealbum@gmail.com", key="daily_report_to")
+    html, summary = build_daily_report_html(report_date)
+    a, b, c = st.columns(3)
+    with a: kpi("Sales Today", fmt_ugx(summary["total_sales"]))
+    with b: kpi("Pending Balances", fmt_ugx(summary["total_pending"]))
+    with c: kpi("Unreconciled (Drivers)", fmt_ugx(summary["unreconciled_total"]))
+    with st.expander("Preview the report"):
+        st.markdown(html, unsafe_allow_html=True)
+    if not os.environ.get("SMTP_EMAIL") or not os.environ.get("SMTP_APP_PASSWORD"):
+        st.warning("Email sending isn't configured on this server yet — see the setup guide to add SMTP_EMAIL and SMTP_APP_PASSWORD.")
+    if st.button("📧 Send This Report Now", width='stretch'):
+        with st.spinner("Sending..."):
+            success, message = send_daily_report_email(to_addr.strip(), report_date)
+        if success:
+            st.success(message)
+        else:
+            st.error(message)
+
+
 def render_push_subscription_admin():
     """Owner/Admin panel: review every device signed up for background notifications and
     clear out the ones that no longer exist."""
@@ -5584,6 +5888,7 @@ def render_admin():
     render_order_lookup_and_fix(df)
     render_staff_accounts()
     render_push_subscription_admin()
+    render_daily_report_panel()
     st.markdown("## 🔧 Operational Detail")
     c1,c2,c3,c4 = st.columns(4)
     with c1: kpi("Orders", f"{len(df):,}")
