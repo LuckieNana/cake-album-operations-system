@@ -2415,38 +2415,6 @@ def order_card(row, extra=None, show_image=True):
                     st.caption(f"Couldn't preview {vr['filename']} — file may be corrupted.")
 
 
-def render_copyable_cake_details(cake_row, extra_fields=None):
-    """Shows cake details two ways: a nicely bolded version to actually read, and a plain
-    st.code() block right below it for the one-click copy button - st.code() can't show
-    bold text (it's meant for raw, unformatted text), so this gives both rather than
-    picking one over the other. extra_fields lets a caller add its own (label, value)
-    pairs on top of the standard set, e.g. who's assigned for this specific role."""
-    fields = [
-        ("Order", cake_row.get("order_id")),
-        ("Customer", disp(cake_row.get("customer_name"))),
-        ("Phone", disp(cake_row.get("customer_number"))),
-        ("Product", disp(cake_row.get("product_type"))),
-        ("Category", disp(cake_row.get("cake_category"))),
-        ("Flavours", disp(cake_row.get("flavours"))),
-        ("Size", f"{disp(cake_row.get('cake_size_value'))}\""),
-        ("Shape", disp(cake_row.get("cake_shape"))),
-        ("Icing/Finish", disp(cake_row.get("icing_type"))),
-        ("Design Notes", disp(cake_row.get("design_description"))),
-        ("Price", fmt_ugx(cake_row.get("price_ugx"))),
-        ("Balance", fmt_ugx(cake_row.get("balance"))),
-        ("Due", f"{disp(cake_row.get('due_date'))} at {disp(cake_row.get('expected_time'))}"),
-        ("Currently at", disp(cake_row.get("workflow_status"))),
-        ("Urgency", disp(cake_row.get("urgency_level"))),
-    ]
-    if extra_fields:
-        fields.extend(extra_fields)
-    for label, value in fields:
-        st.markdown(f"**{label}:** {value}")
-    details_text = "\n".join(f"{label}: {value}" for label, value in fields)
-    st.caption("Tap the copy icon in the corner below to grab these details for your own notes.")
-    st.code(details_text, language=None)
-
-
 def render_reference_images(row):
     """Shows whatever reference image(s) the customer provided, trying each storage
     format the app has used over time. Pulled out as its own function so both the
@@ -4787,7 +4755,22 @@ def render_order_gallery(df, title="🖼️ All Active Orders"):
             has_image = render_reference_images(cake_row)
             if not has_image:
                 st.caption("No reference image was uploaded for this order.")
-            render_copyable_cake_details(cake_row)
+            details_text = (
+                f"Order: {cake_row.get('order_id')}\n"
+                f"Customer: {disp(cake_row.get('customer_name'))}  Phone: {disp(cake_row.get('customer_number'))}\n"
+                f"Product: {disp(cake_row.get('product_type'))}\n"
+                f"Category: {disp(cake_row.get('cake_category'))}\n"
+                f"Flavours: {disp(cake_row.get('flavours'))}\n"
+                f"Size: {disp(cake_row.get('cake_size_value'))}\"  Shape: {disp(cake_row.get('cake_shape'))}\n"
+                f"Icing/Finish: {disp(cake_row.get('icing_type'))}\n"
+                f"Design Notes: {disp(cake_row.get('design_description'))}\n"
+                f"Price: {fmt_ugx(cake_row.get('price_ugx'))}  Balance: {fmt_ugx(cake_row.get('balance'))}\n"
+                f"Due: {disp(cake_row.get('due_date'))} at {disp(cake_row.get('expected_time'))}\n"
+                f"Currently at: {disp(cake_row.get('workflow_status'))}\n"
+                f"Urgency: {disp(cake_row.get('urgency_level'))}"
+            )
+            st.caption("Tap the copy icon in the corner below to grab these details for your own notes.")
+            st.code(details_text, language=None)
 
 
 def render_incoming_workload_forecast(df, staff_column, role_label, pre_stage_statuses, next_stage_label):
@@ -4823,9 +4806,22 @@ def render_incoming_workload_forecast(df, staff_column, role_label, pre_stage_st
                 if not has_image:
                     st.caption("No reference image was uploaded for this order.")
                 assigned_person = disp(cake_row.get(staff_column))
-                render_copyable_cake_details(cake_row, extra_fields=[
-                    (role_label, assigned_person if assigned_person != "—" else "Not yet named"),
-                ])
+                details_text = (
+                    f"Order: {cake_row.get('order_id')}\n"
+                    f"Customer: {disp(cake_row.get('customer_name'))}\n"
+                    f"Product: {disp(cake_row.get('product_type'))}\n"
+                    f"Category: {disp(cake_row.get('cake_category'))}\n"
+                    f"Flavours: {disp(cake_row.get('flavours'))}\n"
+                    f"Size: {disp(cake_row.get('cake_size_value'))}\"  Shape: {disp(cake_row.get('cake_shape'))}\n"
+                    f"Icing/Finish: {disp(cake_row.get('icing_type'))}\n"
+                    f"Design Notes: {disp(cake_row.get('design_description'))}\n"
+                    f"Due: {disp(cake_row.get('due_date'))} at {disp(cake_row.get('expected_time'))}\n"
+                    f"Currently at: {disp(cake_row.get('workflow_status'))}\n"
+                    f"{role_label}: {assigned_person if assigned_person != '—' else 'Not yet named'}\n"
+                    f"Urgency: {disp(cake_row.get('urgency_level'))}"
+                )
+                st.caption("Tap the copy icon in the corner below to grab these details for your own notes.")
+                st.code(details_text, language=None)
 
 
 def render_decoration():
