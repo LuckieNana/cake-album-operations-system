@@ -2397,7 +2397,28 @@ def order_card(row, extra=None, show_image=True):
 
     if not show_image:
         return
+    render_reference_images(row)
 
+    order_id_for_videos = row.get("order_id") if hasattr(row, "get") else getattr(row, "order_id", None)
+    if order_id_for_videos:
+        with connect() as _vconn:
+            _vconn.row_factory = sqlite3.Row
+            vid_rows = _vconn.execute(
+                "SELECT filename, mime_type, data_base64 FROM order_videos WHERE order_id=? ORDER BY id", (order_id_for_videos,)
+            ).fetchall()
+        if vid_rows:
+            st.markdown(f"**🎥 Customer Reference Video(s)** — {len(vid_rows)} uploaded")
+            for vr in vid_rows:
+                try:
+                    st.video(base64.b64decode(vr["data_base64"]), format=vr["mime_type"] or "video/mp4")
+                except Exception:
+                    st.caption(f"Couldn't preview {vr['filename']} — file may be corrupted.")
+
+
+def render_reference_images(row):
+    """Shows whatever reference image(s) the customer provided, trying each storage
+    format the app has used over time. Pulled out as its own function so both the
+    normal order card and the Incoming Workload preview cards can use it."""
     images_shown = False
     images_json = row.get("reference_images_json")
     if images_json:
@@ -2418,24 +2439,12 @@ def order_card(row, extra=None, show_image=True):
         if img_b64 and isinstance(img_b64, str) and img_b64.startswith("data:image"):
             st.markdown("**📷 Customer Reference Image**")
             st.image(img_b64, caption="What the customer wants — refer to this at every stage", width=420)
+            images_shown = True
         elif path and isinstance(path, str) and Path(path).exists():
             st.markdown("**📷 Customer Reference Image**")
             st.image(path, caption="What the customer wants — refer to this at every stage", width=420)
-
-    order_id_for_videos = row.get("order_id") if hasattr(row, "get") else getattr(row, "order_id", None)
-    if order_id_for_videos:
-        with connect() as _vconn:
-            _vconn.row_factory = sqlite3.Row
-            vid_rows = _vconn.execute(
-                "SELECT filename, mime_type, data_base64 FROM order_videos WHERE order_id=? ORDER BY id", (order_id_for_videos,)
-            ).fetchall()
-        if vid_rows:
-            st.markdown(f"**🎥 Customer Reference Video(s)** — {len(vid_rows)} uploaded")
-            for vr in vid_rows:
-                try:
-                    st.video(base64.b64decode(vr["data_base64"]), format=vr["mime_type"] or "video/mp4")
-                except Exception:
-                    st.caption(f"Couldn't preview {vr['filename']} — file may be corrupted.")
+            images_shown = True
+    return images_shown
 
 
 def table(df, columns):
@@ -4716,10 +4725,31 @@ def render_incoming_workload_forecast(df, staff_column, role_label, pre_stage_st
         for i, (_, day_row) in enumerate(counts_by_day.head(6).iterrows()):
             with cols[i % len(cols)]:
                 st.metric(day_row["due_date"], f"{day_row['count']} cake(s)")
-        st.markdown("#### Full List")
-        table(upcoming.sort_values(["due_date", "expected_time"]),
-              ["order_id", "product_type", "due_date", "expected_time", "flavours", "cake_size_value",
-               "cake_shape", staff_column, "workflow_status", "urgency_level"])
+        st.markdown("#### Full List — Click a Cake to See Its Image and Copy Its Details")
+        upcoming_sorted = upcoming.sort_values(["due_date", "expected_time"])
+        for _, cake_row in upcoming_sorted.iterrows():
+            label = f"{cake_row.get('order_id')} — {disp(cake_row.get('flavours'))} — Due {disp(cake_row.get('due_date'))}"
+            with st.expander(label):
+                has_image = render_reference_images(cake_row)
+                if not has_image:
+                    st.caption("No reference image was uploaded for this order.")
+                assigned_person = disp(cake_row.get(staff_column))
+                details_text = (
+                    f"Order: {cake_row.get('order_id')}\n"
+                    f"Customer: {disp(cake_row.get('customer_name'))}\n"
+                    f"Product: {disp(cake_row.get('product_type'))}\n"
+                    f"Category: {disp(cake_row.get('cake_category'))}\n"
+                    f"Flavours: {disp(cake_row.get('flavours'))}\n"
+                    f"Size: {disp(cake_row.get('cake_size_value'))}\"  Shape: {disp(cake_row.get('cake_shape'))}\n"
+                    f"Icing/Finish: {disp(cake_row.get('icing_type'))}\n"
+                    f"Design Notes: {disp(cake_row.get('design_description'))}\n"
+                    f"Due: {disp(cake_row.get('due_date'))} at {disp(cake_row.get('expected_time'))}\n"
+                    f"Currently at: {disp(cake_row.get('workflow_status'))}\n"
+                    f"{role_label}: {assigned_person if assigned_person != '—' else 'Not yet named'}\n"
+                    f"Urgency: {disp(cake_row.get('urgency_level'))}"
+                )
+                st.caption("Tap the copy icon in the corner below to grab these details for your own notes.")
+                st.code(details_text, language=None)
 
 
 def render_decoration():
