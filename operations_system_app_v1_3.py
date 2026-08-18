@@ -2698,6 +2698,7 @@ def render_customer_care():
 
     render_customer_profile_lookup(df)
     render_followup_complaints_section(df)
+    render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
 
     if st.session_state.get("is_hod"):
         with st.expander("👑 HOD: Correct a Wrongly Entered Order"):
@@ -3155,10 +3156,10 @@ def render_customer_care():
 def render_finance():
     page_header("💰 Finance", "Confirm deposits/full payments, approve no-deposit orders, confirm delivery money, track drivers, and reconcile daily.")
     df = load_orders()
-    t1,t2,t3,t4,t5,t6,t7 = st.tabs([
+    t1,t2,t3,t4,t5,t6,t7,t8 = st.tabs([
         "Confirm Order Payments", "Approve Pay on Delivery", "Confirm Delivery Money",
         "Drivers Out & Trip Tracking", "Cash Clearance (Driver Returns)", "Daily 5PM Reconciliation",
-        "Staff Accountability",
+        "Staff Accountability", "🖼️ All Orders",
     ])
 
     with t1:
@@ -3376,6 +3377,9 @@ def render_finance():
                                  (new_status, notes, by, now_iso(), cid))
                     conn.commit()
                 st.success(f"Accountability record for {cid} updated to '{new_status}'."); st.rerun()
+
+    with t8:
+        render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
 
 def render_production_planning():
     page_header("🏭 Production Planning", "Assign production teams, plan extra baking buffers, and reserve inventory for urgent orders.")
@@ -4672,6 +4676,9 @@ def render_design_innovation():
         table(ssent.sort_values("Sent At", ascending=False),
               ["order_id", "customer_name", "Sent At", "Sent To", "Acknowledged?", "Acknowledged By", "Acknowledged At"])
 
+    st.divider()
+    render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
+
 
 MINUTES_DECORATION_DEFAULT = 30   # default minimum decoration time
 MINUTES_DECORATION_FONDANT = 60   # fondant needs at least 1 hour
@@ -4955,38 +4962,42 @@ def render_procurement():
     req = load_table("order_material_requirements")
     if req.empty:
         st.info("No material requirements submitted yet.")
-        return
-    table(req, ["id","order_id","item_name","quantity_required","unit","requirement_status","requested_by","requested_at"])
-    req_options = [f"#{r.id} — {r.item_name} ({r.quantity_required:g} {r.unit}) for {r.order_id}" for r in req.itertuples()]
-    req_pick = st.selectbox("Select a requirement (search by typing item name, order ID, or number)", req_options, key="proc_req_pick")
-    rid = int(req_pick.split(" — ")[0].lstrip("#"))
-    status = st.selectbox("Procurement action", ["Issued", "Partially Issued", "Out of Stock", "Requisition Required"])
-    issued_qty = st.number_input("Quantity issued", min_value=0.0, step=1.0)
-    by = st.text_input("Updated by", value="Procurement")
-    notes = st.text_input("Notes")
-    if st.button("Update Requirement", width='stretch'):
-        matches = req[req["id"] == rid]
-        if matches.empty:
-            st.error("No requirement found with that ID.")
-        else:
-            row_req = matches.iloc[0]
-            with connect() as conn:
-                conn.execute("UPDATE order_material_requirements SET requirement_status=? WHERE id=?", (status, rid))
-                conn.execute("INSERT INTO material_issues(requirement_id, quantity_issued, issued_by, issued_to, issue_status, issued_at, notes) VALUES(?,?,?,?,?,?,?)",
-                             (rid, issued_qty, by, row_req.requested_by, status, now_iso(), notes))
-                if status == "Requisition Required":
-                    conn.execute("INSERT INTO procurement_requisitions(requirement_id, order_id, item_name, quantity_required, requisition_status, requested_at, updated_by) VALUES(?,?,?,?,?,?,?)",
-                                 (rid, row_req.order_id, row_req.item_name, row_req.quantity_required, "Pending Procurement", now_iso(), by))
-                conn.commit()
-                requester_dept = None
-                if row_req.order_id:
-                    owner_row = conn.execute("SELECT current_owner FROM orders WHERE order_id=?", (row_req.order_id,)).fetchone()
-                    requester_dept = owner_row[0] if owner_row else None
-            status_icon = {"Issued": "✅", "Partially Issued": "⚠️", "Out of Stock": "❌", "Requisition Required": "📋"}.get(status, "🧾")
-            if requester_dept:
-                create_notification(row_req.order_id, requester_dept, row_req.requested_by,
-                                     f"{status_icon} {row_req.item_name} ({row_req.quantity_required:g} {row_req.unit}) for {row_req.order_id} — {status.lower()} by Procurement.")
-            st.success("Procurement updated."); st.rerun()
+    else:
+        table(req, ["id","order_id","item_name","quantity_required","unit","requirement_status","requested_by","requested_at"])
+        req_options = [f"#{r.id} — {r.item_name} ({r.quantity_required:g} {r.unit}) for {r.order_id}" for r in req.itertuples()]
+        req_pick = st.selectbox("Select a requirement (search by typing item name, order ID, or number)", req_options, key="proc_req_pick")
+        rid = int(req_pick.split(" — ")[0].lstrip("#"))
+        status = st.selectbox("Procurement action", ["Issued", "Partially Issued", "Out of Stock", "Requisition Required"])
+        issued_qty = st.number_input("Quantity issued", min_value=0.0, step=1.0)
+        by = st.text_input("Updated by", value="Procurement")
+        notes = st.text_input("Notes")
+        if st.button("Update Requirement", width='stretch'):
+            matches = req[req["id"] == rid]
+            if matches.empty:
+                st.error("No requirement found with that ID.")
+            else:
+                row_req = matches.iloc[0]
+                with connect() as conn:
+                    conn.execute("UPDATE order_material_requirements SET requirement_status=? WHERE id=?", (status, rid))
+                    conn.execute("INSERT INTO material_issues(requirement_id, quantity_issued, issued_by, issued_to, issue_status, issued_at, notes) VALUES(?,?,?,?,?,?,?)",
+                                 (rid, issued_qty, by, row_req.requested_by, status, now_iso(), notes))
+                    if status == "Requisition Required":
+                        conn.execute("INSERT INTO procurement_requisitions(requirement_id, order_id, item_name, quantity_required, requisition_status, requested_at, updated_by) VALUES(?,?,?,?,?,?,?)",
+                                     (rid, row_req.order_id, row_req.item_name, row_req.quantity_required, "Pending Procurement", now_iso(), by))
+                    conn.commit()
+                    requester_dept = None
+                    if row_req.order_id:
+                        owner_row = conn.execute("SELECT current_owner FROM orders WHERE order_id=?", (row_req.order_id,)).fetchone()
+                        requester_dept = owner_row[0] if owner_row else None
+                status_icon = {"Issued": "✅", "Partially Issued": "⚠️", "Out of Stock": "❌", "Requisition Required": "📋"}.get(status, "🧾")
+                if requester_dept:
+                    create_notification(row_req.order_id, requester_dept, row_req.requested_by,
+                                         f"{status_icon} {row_req.item_name} ({row_req.quantity_required:g} {row_req.unit}) for {row_req.order_id} — {status.lower()} by Procurement.")
+                st.success("Procurement updated."); st.rerun()
+
+    st.divider()
+    render_order_gallery(load_orders(), "🖼️ All Orders — Images & Copyable Details")
+
 
 
 def delivery_note_html(row, fmt="full"):
@@ -5063,7 +5074,7 @@ def render_packaging(show_header=True):
         page_header("📦 Packaging", "Pack cake, print simple delivery note, and send to Dispatch.")
     df = load_orders()
     render_hod_overview("Packaging", df)
-    t1,t2,t3,t4 = st.tabs(["Ready for Packaging", "Packaging", "Delivery Note", "✅ Finished Work"])
+    t1,t2,t3,t4,t5 = st.tabs(["Ready for Packaging", "Packaging", "Delivery Note", "✅ Finished Work", "🖼️ All Orders"])
     with t1:
         ready_q = filter_orders(df,["Ready for Packaging"])
         render_queue_table(ready_q, "Cakes Ready For Packaging")
@@ -5109,6 +5120,9 @@ def render_packaging(show_header=True):
 
     with t4:
         render_finished_work_tab("Packaging")
+
+    with t5:
+        render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
 
 
 def render_dispatch(show_header=True):
