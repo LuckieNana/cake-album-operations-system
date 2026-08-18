@@ -3571,6 +3571,26 @@ def render_production_planning():
                     }, by_inv, "Baked Inventory Reserved — Baking Skipped, Team Pre-Assigned", "Production Planning")
                     create_notification(row.order_id, "Filling / Piling", piler_val,
                                          f"🚨 {row.order_id} ({disp(row.get('customer_name'))}) — urgent, baking skipped, ready to pile now.")
+                    # This urgent path was missing the topper/sticker handoff that the normal
+                    # assignment flow already does - meaning any topper or sticker instructions
+                    # for an urgent order silently never reached Design & Innovation as an
+                    # actionable, notified assignment. Fixed to match the normal flow exactly.
+                    if str(row.get("topper_required")) == "Yes":
+                        target = topper_target_datetime(row)
+                        update_order(row.order_id, {
+                            "topper_assigned_to": "Keith", "topper_status": "Assigned",
+                            "topper_target_at": target.isoformat() if target is not None else None,
+                            "topper_pickup_note": "Topper assigned to Keith"
+                        }, by_inv, "Topper Assigned", "Production Planning")
+                        create_notification(row.order_id, "Design & Innovation", "Keith",
+                                             f"🚨 Urgent order — new topper assignment. Words: {disp(row.get('topper_wording'))}. Decorator: {decorator_val}.")
+                    if str(row.get("sticker_required")) == "Yes":
+                        update_order(row.order_id, {
+                            "sticker_assigned_to": "Doreen", "sticker_status": "Assigned",
+                            "sticker_pickup_note": "Sticker assigned to Doreen"
+                        }, by_inv, "Sticker Assigned", "Production Planning")
+                        create_notification(row.order_id, "Design & Innovation", "Doreen",
+                                             f"🚨 Urgent order — new sticker assignment for {row.order_id}. Notes: {disp(row.get('sticker_notes'))}. Decorator: {decorator_val}.")
                     st.success(f"Inventory reserved and team pre-assigned "
                                f"(Piler: {piler_val or 'none yet'}, Coverer: {coverer_val or 'none yet'}, Decorator: {decorator_val or 'none yet'}). "
                                f"Cake sent to Piling.")
@@ -4705,6 +4725,47 @@ def render_finished_work_tab(department_label, staff_column=None):
     table(merged, ["performed_at", "order_id", "customer_name", "product_type", "flavours", "action_type", "performed_by"])
 
 
+def render_order_gallery(df, title="🖼️ All Active Orders"):
+    """Same visual card view as the production departments' Incoming Workload - a cake's
+    reference image plus a copyable block of every detail - but for departments that see
+    orders across the whole pipeline rather than one specific upcoming stage. Sorted with
+    urgent orders first, then by due date and time."""
+    st.markdown(f"### {title}")
+    active = df[df["workflow_status"] != "Follow-up Done"] if not df.empty else df.iloc[0:0]
+    if active.empty:
+        st.info("No active orders right now.")
+        return
+    active = active.copy()
+    active["_urgency_rank"] = (active["urgency_level"] == "Urgent").astype(int) if "urgency_level" in active.columns else 0
+    active_sorted = active.sort_values(["_urgency_rank", "due_date", "expected_time"], ascending=[False, True, True])
+    st.caption(f"{len(active_sorted)} active order(s). Click any one to see its reference image and copy its details.")
+    for _, cake_row in active_sorted.iterrows():
+        urgent_tag = "🚨 URGENT — " if str(cake_row.get("urgency_level")) == "Urgent" else ""
+        label = (f"{urgent_tag}{cake_row.get('order_id')} — {disp(cake_row.get('customer_name'))} — "
+                 f"{disp(cake_row.get('flavours'))} — Due {disp(cake_row.get('due_date'))} {disp(cake_row.get('expected_time'))} — "
+                 f"{disp(cake_row.get('workflow_status'))}")
+        with st.expander(label):
+            has_image = render_reference_images(cake_row)
+            if not has_image:
+                st.caption("No reference image was uploaded for this order.")
+            details_text = (
+                f"Order: {cake_row.get('order_id')}\n"
+                f"Customer: {disp(cake_row.get('customer_name'))}  Phone: {disp(cake_row.get('customer_number'))}\n"
+                f"Product: {disp(cake_row.get('product_type'))}\n"
+                f"Category: {disp(cake_row.get('cake_category'))}\n"
+                f"Flavours: {disp(cake_row.get('flavours'))}\n"
+                f"Size: {disp(cake_row.get('cake_size_value'))}\"  Shape: {disp(cake_row.get('cake_shape'))}\n"
+                f"Icing/Finish: {disp(cake_row.get('icing_type'))}\n"
+                f"Design Notes: {disp(cake_row.get('design_description'))}\n"
+                f"Price: {fmt_ugx(cake_row.get('price_ugx'))}  Balance: {fmt_ugx(cake_row.get('balance'))}\n"
+                f"Due: {disp(cake_row.get('due_date'))} at {disp(cake_row.get('expected_time'))}\n"
+                f"Currently at: {disp(cake_row.get('workflow_status'))}\n"
+                f"Urgency: {disp(cake_row.get('urgency_level'))}"
+            )
+            st.caption("Tap the copy icon in the corner below to grab these details for your own notes.")
+            st.code(details_text, language=None)
+
+
 def render_incoming_workload_forecast(df, staff_column, role_label, pre_stage_statuses, next_stage_label):
     """Shows the whole department everything still earlier in the pipeline for this role -
     whether or not a specific person has been named yet. The point is visibility as soon as
@@ -4798,19 +4859,7 @@ def render_decoration():
                 st.info(f"👀 Viewing only — this job is assigned to **{first_name(row.get('decorator_assigned'))}**.")
             _,_,_,_decorators_ma,_ = staff_lists()
             render_multi_assign(row, "decorator_assigned", "Decorator", _decorators_ma, f"deco_{row.order_id}")
-            required_mins = decoration_minimum_minutes(row)
-            elapsed = minutes_elapsed_since(row.get("decorating_started_at"))
-            can_finish = (elapsed is None or required_mins == 0 or elapsed >= required_mins) and may_act
-            if required_mins == 0:
-                st.info(f"Icing type **{disp(row.get('icing_type'))}** — no minimum decoration time enforced.")
-            elif elapsed is not None:
-                remaining = max(required_mins - elapsed, 0)
-                if remaining > 0:
-                    extra = " Fondant needs more time to set — please give the cake more time." if row.get("icing_type") == "Fondant" else ""
-                    st.warning(f"⏳ {disp(row.get('icing_type'))} needs at least {required_mins} minute(s) of decoration time. "
-                               f"About {remaining:.0f} more minute(s) to go.{extra}")
-                else:
-                    st.success(f"✅ Minimum decoration time of {required_mins} minute(s) met.")
+            can_finish = may_act
             if str(row.get("topper_required")) == "Yes":
                 st.markdown("### 🎨 Topper Handoff")
                 if str(row.get("topper_status")) == "Ready":
