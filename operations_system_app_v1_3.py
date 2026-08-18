@@ -4726,9 +4726,13 @@ def render_incoming_workload_forecast(df, staff_column, role_label, pre_stage_st
             with cols[i % len(cols)]:
                 st.metric(day_row["due_date"], f"{day_row['count']} cake(s)")
         st.markdown("#### Full List — Click a Cake to See Its Image and Copy Its Details")
-        upcoming_sorted = upcoming.sort_values(["due_date", "expected_time"])
+        upcoming = upcoming.copy()
+        upcoming["_urgency_rank"] = (upcoming["urgency_level"] == "Urgent").astype(int) if "urgency_level" in upcoming.columns else 0
+        upcoming_sorted = upcoming.sort_values(["_urgency_rank", "due_date", "expected_time"], ascending=[False, True, True])
         for _, cake_row in upcoming_sorted.iterrows():
-            label = f"{cake_row.get('order_id')} — {disp(cake_row.get('flavours'))} — Due {disp(cake_row.get('due_date'))}"
+            urgent_tag = "🚨 URGENT — " if str(cake_row.get("urgency_level")) == "Urgent" else ""
+            label = (f"{urgent_tag}{cake_row.get('order_id')} — {disp(cake_row.get('customer_name'))} — "
+                     f"{disp(cake_row.get('flavours'))} — Due {disp(cake_row.get('due_date'))} {disp(cake_row.get('expected_time'))}")
             with st.expander(label):
                 has_image = render_reference_images(cake_row)
                 if not has_image:
