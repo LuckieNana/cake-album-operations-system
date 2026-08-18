@@ -4613,7 +4613,7 @@ def render_design_innovation():
             st.success("All topper tasks are completed.")
         else:
             order_card(row,[("Topper Words",row.get("topper_wording")),("Topper Notes",row.get("topper_notes")),("Decorator",row.get("decorator_assigned")),("Urgency",topper_urgency(row)),("Status",row.get("topper_status"))])
-            render_stage_material_planning("Design & Innovation", row, row.get("topper_assigned_to"))
+            render_stage_material_planning("Design & Innovation", row, row.get("topper_assigned_to"), key_prefix="topper")
             by=st.text_input("Updated by",value=disp(row.get("topper_assigned_to")) if disp(row.get("topper_assigned_to"))!="—" else "Keith")
             a,b=st.columns(2)
             if a.button("🎨 Start Topper",width='stretch'):
@@ -4639,7 +4639,7 @@ def render_design_innovation():
             st.success("All sticker tasks are completed.")
         else:
             order_card(srow, [("Sticker Notes", srow.get("sticker_notes")), ("Decorator", srow.get("decorator_assigned")), ("Status", srow.get("sticker_status"))])
-            render_stage_material_planning("Design & Innovation", srow, srow.get("sticker_assigned_to"))
+            render_stage_material_planning("Design & Innovation", srow, srow.get("sticker_assigned_to"), key_prefix="sticker")
             sby = st.text_input("Updated by", value=disp(srow.get("sticker_assigned_to")) if disp(srow.get("sticker_assigned_to")) != "—" else "Doreen", key="sticker_updated_by")
             sa, sb = st.columns(2)
             if sa.button("🏷️ Start Sticker", width='stretch'):
