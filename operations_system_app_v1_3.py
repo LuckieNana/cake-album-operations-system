@@ -1126,10 +1126,10 @@ else:
 
 
 def _render_team_chat_body():
-    """A simple internal chat: tag anyone in the company by name, send them a message,
-    and they get a real push notification on their phone/desktop the same way order
-    notifications work - reusing send_push_to_people rather than building a separate
-    delivery mechanism. Lives in the sidebar so it's reachable from every page."""
+    """An internal chat with real back-and-forth conversations: pick a colleague, see
+    the full thread of messages between you and them (both directions), and reply right
+    there. Each message still triggers a real push notification the same way order
+    notifications work. Lives in the sidebar so it's reachable from every page."""
     my_username = st.session_state.get("username", "").strip()
     my_name = st.session_state.get("staff_name", "").strip()
     if not my_username:
@@ -1140,43 +1140,88 @@ def _render_team_chat_body():
     people = sorted([n for n in accounts["full_name"].tolist() if n and n.strip() != my_name]) if not accounts.empty else []
 
     msgs = load_table("team_chat_messages")
-    mine = msgs[msgs["recipient"].astype(str).str.strip().str.lower() == my_name.lower()] if not msgs.empty else msgs
-    unread = mine[mine["read_at"].isna() | (mine["read_at"] == "")] if not mine.empty else mine
-    unread_count = len(unread)
+    my_name_lower = my_name.lower()
+    involving_me = msgs[
+        (msgs["recipient"].astype(str).str.strip().str.lower() == my_name_lower) |
+        (msgs["sender"].astype(str).str.strip().str.lower() == my_name_lower)
+    ] if not msgs.empty else msgs
+    unread_to_me = msgs[
+        (msgs["recipient"].astype(str).str.strip().str.lower() == my_name_lower) &
+        (msgs["read_at"].isna() | (msgs["read_at"] == ""))
+    ] if not msgs.empty else msgs
+    unread_count = len(unread_to_me)
+    unread_by_partner = unread_to_me.groupby("sender").size().to_dict() if not unread_to_me.empty else {}
+
+    # Figure out who I've ever exchanged messages with, most recent conversation first.
+    partner_last_activity = {}
+    for _, m in involving_me.iterrows():
+        other = str(m["sender"]).strip() if str(m["sender"]).strip().lower() != my_name_lower else str(m["recipient"]).strip()
+        if other and (other not in partner_last_activity or m["created_at"] > partner_last_activity[other]):
+            partner_last_activity[other] = m["created_at"]
+    partner_list = sorted(partner_last_activity.keys(), key=lambda p: partner_last_activity[p], reverse=True)
+
+    # Real option values are always just the person's name (stable across reruns) -
+    # the "(N new)" text is display-only via format_func, so a message being marked
+    # read mid-session never invalidates whatever the selectbox currently has stored.
+    new_convo_value = "__new__"
+    dropdown_values = [new_convo_value] + partner_list
+
+    def _format_partner_option(value):
+        if value == new_convo_value:
+            return "+ New conversation"
+        n = unread_by_partner.get(value, 0)
+        return f"{first_name(value)} ({n} new)" if n else first_name(value)
 
     with st.sidebar:
         st.markdown("---")
-        label = f"💬 Team Chat ({unread_count} new)" if unread_count else "💬 Team Chat"
-        with st.expander(label, expanded=(unread_count > 0)):
-            if mine.empty:
-                st.caption("No messages yet.")
-            else:
-                for _, m in mine.sort_values("created_at", ascending=False).head(15).iterrows():
-                    is_unread = not m.get("read_at")
-                    prefix = "🔵 " if is_unread else ""
-                    st.markdown(f"{prefix}**{m['sender']}** ({disp(m.get('sender_department'))}) — {m['created_at']}")
-                    st.caption(m["message"])
-                if unread_count and st.button("Mark all as read", key="chat_mark_read", width='stretch'):
-                    with connect() as conn:
-                        conn.execute("""UPDATE team_chat_messages SET read_at=? WHERE recipient=? AND (read_at IS NULL OR read_at='')""",
-                                     (now_iso(), my_name))
-                        conn.commit()
-                    st.rerun()
-            st.markdown("**Send a message**")
-            if not people:
-                st.caption("No other active staff found to message.")
-            else:
-                recipient = st.selectbox("Tag someone", people, key="chat_recipient")
-                message_text = st.text_area("Message", key="chat_message_text", height=80)
+        header = f"💬 Team Chat ({unread_count} new)" if unread_count else "💬 Team Chat"
+        with st.expander(header, expanded=(unread_count > 0)):
+            if "chat_partner_pick" not in st.session_state and len(dropdown_values) > 1:
+                st.session_state["chat_partner_pick"] = dropdown_values[1]
+            chat_partner = st.selectbox("Conversation", dropdown_values, format_func=_format_partner_option, key="chat_partner_pick")
+            if chat_partner == new_convo_value:
+                chat_partner = st.selectbox("Start a new conversation with", people, key="chat_new_recipient") if people else None
+                if not people:
+                    st.caption("No other active staff found to message.")
+
+            thread = pd.DataFrame()
+            if chat_partner:
+                thread = involving_me[
+                    (involving_me["sender"].astype(str).str.strip() == chat_partner) |
+                    (involving_me["recipient"].astype(str).str.strip() == chat_partner)
+                ].sort_values("created_at")
+                st.markdown(f"**Conversation with {first_name(chat_partner)}**")
+                if thread.empty:
+                    st.caption("No messages yet — say hello below.")
+                else:
+                    for _, m in thread.tail(20).iterrows():
+                        is_me = str(m["sender"]).strip().lower() == my_name_lower
+                        who = "You" if is_me else first_name(m["sender"])
+                        st.markdown(f"**{who}** · {m['created_at']}")
+                        st.caption(m["message"])
+                    unread_ids = thread[
+                        (thread["sender"].astype(str).str.strip() == chat_partner) &
+                        (thread["read_at"].isna() | (thread["read_at"] == ""))
+                    ]["id"].tolist()
+                    if unread_ids:
+                        with connect() as conn:
+                            conn.executemany("UPDATE team_chat_messages SET read_at=? WHERE id=?",
+                                              [(now_iso(), int(i)) for i in unread_ids])
+                            conn.commit()
+
+                msg_gen = st.session_state.get("chat_message_gen", 0)
+                message_text = st.text_area("Reply" if not thread.empty else "Message",
+                                             key=f"chat_message_text_{msg_gen}", height=80)
                 if st.button("Send", key="chat_send_btn", width='stretch'):
                     if message_text.strip():
+                        last_id = int(thread.iloc[-1]["id"]) if not thread.empty else None
                         with connect() as conn:
-                            conn.execute("""INSERT INTO team_chat_messages(sender, sender_department, recipient, message, created_at)
-                                            VALUES(?,?,?,?,?)""",
-                                         (my_name, st.session_state.get("department"), recipient, message_text.strip(), now_iso()))
+                            conn.execute("""INSERT INTO team_chat_messages(sender, sender_department, recipient, message, created_at, reply_to_id)
+                                            VALUES(?,?,?,?,?,?)""",
+                                         (my_name, st.session_state.get("department"), chat_partner, message_text.strip(), now_iso(), last_id))
                             conn.commit()
-                        send_push_to_people([recipient], f"💬 New message from {my_name}", message_text.strip())
-                        st.success(f"Sent to {first_name(recipient)}.")
+                        send_push_to_people([chat_partner], f"💬 New message from {my_name}", message_text.strip())
+                        st.session_state["chat_message_gen"] = msg_gen + 1
                         st.rerun()
                     else:
                         st.error("Type a message first.")
@@ -1473,6 +1518,7 @@ def ensure_base_schema():
         conn.execute("""CREATE TABLE IF NOT EXISTS team_chat_messages(
             id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, sender_department TEXT,
             recipient TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT NOT NULL, read_at TEXT)""")
+        safe_add_column(conn, "team_chat_messages", "reply_to_id", "INTEGER")
         conn.execute("""CREATE TABLE IF NOT EXISTS order_videos(
             id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, filename TEXT, mime_type TEXT,
             data_base64 TEXT NOT NULL, file_size_bytes INTEGER, uploaded_at TEXT)""")
