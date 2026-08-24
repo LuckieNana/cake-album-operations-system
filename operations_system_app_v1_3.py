@@ -626,6 +626,7 @@ def page_header(title: str, subtitle: str = ""):
     st.markdown(f"<div class='ca-header'><h1>{title}</h1><p>{subtitle}</p></div>", unsafe_allow_html=True)
     render_staff_greeting()
     render_department_notifications()
+    render_team_chat()
     render_idea_submission_widget()
 
 
@@ -1124,6 +1125,69 @@ else:
     render_department_notifications = _render_department_notifications_body
 
 
+def _render_team_chat_body():
+    """A simple internal chat: tag anyone in the company by name, send them a message,
+    and they get a real push notification on their phone/desktop the same way order
+    notifications work - reusing send_push_to_people rather than building a separate
+    delivery mechanism. Lives in the sidebar so it's reachable from every page."""
+    my_username = st.session_state.get("username", "").strip()
+    my_name = st.session_state.get("staff_name", "").strip()
+    if not my_username:
+        return
+
+    accounts = load_table("staff_accounts")
+    accounts = accounts[accounts["is_active"] != "No"] if not accounts.empty and "is_active" in accounts.columns else accounts
+    people = sorted([n for n in accounts["full_name"].tolist() if n and n.strip() != my_name]) if not accounts.empty else []
+
+    msgs = load_table("team_chat_messages")
+    mine = msgs[msgs["recipient"].astype(str).str.strip().str.lower() == my_name.lower()] if not msgs.empty else msgs
+    unread = mine[mine["read_at"].isna() | (mine["read_at"] == "")] if not mine.empty else mine
+    unread_count = len(unread)
+
+    with st.sidebar:
+        st.markdown("---")
+        label = f"💬 Team Chat ({unread_count} new)" if unread_count else "💬 Team Chat"
+        with st.expander(label, expanded=(unread_count > 0)):
+            if mine.empty:
+                st.caption("No messages yet.")
+            else:
+                for _, m in mine.sort_values("created_at", ascending=False).head(15).iterrows():
+                    is_unread = not m.get("read_at")
+                    prefix = "🔵 " if is_unread else ""
+                    st.markdown(f"{prefix}**{m['sender']}** ({disp(m.get('sender_department'))}) — {m['created_at']}")
+                    st.caption(m["message"])
+                if unread_count and st.button("Mark all as read", key="chat_mark_read", width='stretch'):
+                    with connect() as conn:
+                        conn.execute("""UPDATE team_chat_messages SET read_at=? WHERE recipient=? AND (read_at IS NULL OR read_at='')""",
+                                     (now_iso(), my_name))
+                        conn.commit()
+                    st.rerun()
+            st.markdown("**Send a message**")
+            if not people:
+                st.caption("No other active staff found to message.")
+            else:
+                recipient = st.selectbox("Tag someone", people, key="chat_recipient")
+                message_text = st.text_area("Message", key="chat_message_text", height=80)
+                if st.button("Send", key="chat_send_btn", width='stretch'):
+                    if message_text.strip():
+                        with connect() as conn:
+                            conn.execute("""INSERT INTO team_chat_messages(sender, sender_department, recipient, message, created_at)
+                                            VALUES(?,?,?,?,?)""",
+                                         (my_name, st.session_state.get("department"), recipient, message_text.strip(), now_iso()))
+                            conn.commit()
+                        send_push_to_people([recipient], f"💬 New message from {my_name}", message_text.strip())
+                        st.success(f"Sent to {first_name(recipient)}.")
+                        st.rerun()
+                    else:
+                        st.error("Type a message first.")
+
+
+if hasattr(st, "fragment"):
+    render_team_chat = st.fragment(run_every="10s")(_render_team_chat_body)
+else:
+    render_team_chat = _render_team_chat_body
+
+
 # -----------------------------
 # Database helpers
 # -----------------------------
@@ -1406,6 +1470,9 @@ def ensure_base_schema():
         conn.execute("""CREATE TABLE IF NOT EXISTS piler_daily_accountability(
             id INTEGER PRIMARY KEY AUTOINCREMENT, piler_name TEXT, accountability_date TEXT,
             item_name TEXT, quantity_used REAL, unit TEXT, recorded_at TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS team_chat_messages(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, sender_department TEXT,
+            recipient TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT NOT NULL, read_at TEXT)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS order_videos(
             id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, filename TEXT, mime_type TEXT,
             data_base64 TEXT NOT NULL, file_size_bytes INTEGER, uploaded_at TEXT)""")
@@ -3235,6 +3302,26 @@ def render_customer_care():
     st.caption(f"{len(day_orders)} order(s) entered on {pick_date.strftime('%d %b %Y')}" + (" (showing first 20)" if len(day_orders) == 20 else ""))
     table(day_orders, ["order_id","product_type","cake_category","customer_name","order_type","urgency_level","order_quantity","is_bulk_order",
           "price_ugx","balance","payment_arrangement","workflow_status","order_created_at"])
+
+def notify_topper_sticker_if_approved(row, by):
+    """Fires right when Finance moves an order forward (confirmed payment or approved for
+    pay-on-delivery, whichever path). Topper/sticker assignment now happens upfront at
+    Customer Care, but Design & Innovation shouldn't see or hear about it until the order
+    is actually real - i.e. Finance has approved it. This is that one moment things become
+    visible to them, matching the same payment-gate everything else in the pipeline uses."""
+    if str(row.get("topper_required")) == "Yes":
+        owner = disp(row.get("topper_assigned_to"))
+        if owner != "—":
+            create_notification(row.order_id, "Design & Innovation", owner,
+                                 f"🎨 {row.order_id} ({disp(row.get('customer_name'))}) is confirmed — topper needed. "
+                                 f"Words: {disp(row.get('topper_wording'))}.")
+    if str(row.get("sticker_required")) == "Yes":
+        owner = disp(row.get("sticker_assigned_to"))
+        if owner != "—":
+            create_notification(row.order_id, "Design & Innovation", owner,
+                                 f"🏷️ {row.order_id} ({disp(row.get('customer_name'))}) is confirmed — sticker needed. "
+                                 f"Notes: {disp(row.get('sticker_notes'))}.")
+
 
 def render_finance():
     page_header("💰 Finance", "Confirm deposits/full payments, approve no-deposit orders, confirm delivery money, track drivers, and reconcile daily.")
