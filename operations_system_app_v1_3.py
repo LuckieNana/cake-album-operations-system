@@ -13,6 +13,12 @@ import hashlib
 import base64
 import os
 import smtplib
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials as GoogleCredentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import time
@@ -1550,6 +1556,7 @@ def ensure_release_2_schema():
             "sticker_status": "TEXT DEFAULT 'Not Required'", "sticker_assigned_to": "TEXT",
             "sticker_ready_at": "TEXT",
             "sticker_received_by_decorator": "TEXT", "sticker_received_at": "TEXT", "sticker_pickup_note": "TEXT",
+            "skip_baking": "TEXT DEFAULT 'No'",
         }
         order_cols_24 = {r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()}
         for name, definition in topper_cols.items():
@@ -2621,6 +2628,39 @@ def staff_lists():
     )
 
 
+ACTIVE_ASSIGNMENT_STATUSES = [
+    "Deposit Confirmed", "Production Planned", "Baking", "Baking Correction Required",
+    "Piling Incoming", "Piling", "Piling Correction Required",
+    "Covering Incoming", "Covering", "Covering Correction Required",
+    "Decorating Incoming", "Decorating", "Decoration Correction Required", "Studio Check",
+]
+
+
+def staff_workload_counts(staff_column):
+    """Counts how many currently-active orders each person already has assigned to them
+    on a given role column, so whoever's assigning work can see who's free and who's
+    already stretched thin. Only counts orders still genuinely in progress - finished
+    or cancelled work doesn't count against anyone."""
+    df = load_orders()
+    if df.empty or staff_column not in df.columns:
+        return {}
+    active = df[df["workflow_status"].isin(ACTIVE_ASSIGNMENT_STATUSES)]
+    counts = {}
+    for _, row in active.iterrows():
+        names = str(row.get(staff_column) or "")
+        for name in [n.strip() for n in names.split(",") if n.strip()]:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def format_name_with_workload(name, counts):
+    n = counts.get(name, 0)
+    label = first_name(name)
+    if n == 0:
+        return f"{label} (free)"
+    return f"{label} ({n} active)"
+
+
 # -----------------------------
 # Pages
 # -----------------------------
@@ -3018,6 +3058,34 @@ def render_customer_care():
         priority_default = 2 if order_type == "Urgent / Abrupt Order" else 0
         priority = b.selectbox("Priority", ["Normal", "High", "Critical", "Low"], index=priority_default)
         created_by = c.text_input("Order Entered By *")
+
+        st.markdown("### Production Assignment")
+        is_short_pipeline = product_type in SHORT_PIPELINE_PRODUCTS
+        if is_short_pipeline:
+            st.caption(f"{product_type} goes straight from Baking to Packaging — no piler, coverer, or decorator needed for this product.")
+            needs_baking = st.selectbox("Does this need baking, or is it already in inventory?",
+                                         ["Needs baking", "Already in inventory — skip baking"], key="nc_needs_baking_short")
+        else:
+            needs_baking = st.selectbox("Does this need baking, or is it already-baked inventory being used?",
+                                         ["Needs baking", "Already in inventory — skip baking"], key="nc_needs_baking_full")
+
+        bakers_nc, pilers_nc, coverers_nc, decorators_nc, _ = staff_lists()
+        piler_counts = staff_workload_counts("piler_assigned")
+        coverer_counts = staff_workload_counts("coverer_assigned")
+        decorator_counts = staff_workload_counts("decorator_assigned")
+
+        piler_nc, coverer_nc, decorator_nc = [], [], []
+        topper_owner_nc, sticker_owner_nc = "Keith", "Doreen"
+        if not is_short_pipeline:
+            st.caption("Pick who's doing the piling, covering, and decoration for this cake now, so it's already lined up once it's through Baking. Workload shown next to each name is their current active job count.")
+            piler_nc = st.multiselect("Piler(s)", pilers_nc, format_func=lambda n: format_name_with_workload(n, piler_counts), key="nc_piler_multi")
+            coverer_nc = st.multiselect("Coverer(s)", coverers_nc, format_func=lambda n: format_name_with_workload(n, coverer_counts), key="nc_coverer_multi")
+            decorator_nc = st.multiselect("Decorator(s)", decorators_nc, format_func=lambda n: format_name_with_workload(n, decorator_counts), key="nc_decorator_multi")
+            if topper_required == "Yes":
+                topper_owner_nc = st.text_input("Topper assigned to", value="Keith", key="nc_topper_owner")
+            if sticker_required == "Yes":
+                sticker_owner_nc = st.text_input("Sticker assigned to", value="Doreen", key="nc_sticker_owner")
+
         submitted = st.form_submit_button("Create New Order", width='stretch')
 
     if submitted:
@@ -3099,9 +3167,17 @@ def render_customer_care():
             "delivery_window_start": str(delivery_window_start), "delivery_window_end": str(delivery_window_end),
             "topper_required": topper_required, "topper_wording": topper_wording.strip() if topper_required=="Yes" else "",
             "topper_notes": topper_notes.strip() if topper_required=="Yes" else "",
-            "topper_status": "Pending Assignment" if topper_required=="Yes" else "Not Required",
+            "topper_status": ("Assigned" if (topper_required=="Yes" and not is_short_pipeline) else
+                               ("Pending Assignment" if topper_required=="Yes" else "Not Required")),
+            "topper_assigned_to": topper_owner_nc if (topper_required=="Yes" and not is_short_pipeline) else "",
             "sticker_required": sticker_required, "sticker_notes": sticker_notes.strip() if sticker_required=="Yes" else "",
-            "sticker_status": "Pending Assignment" if sticker_required=="Yes" else "Not Required",
+            "sticker_status": ("Assigned" if (sticker_required=="Yes" and not is_short_pipeline) else
+                                ("Pending Assignment" if sticker_required=="Yes" else "Not Required")),
+            "sticker_assigned_to": sticker_owner_nc if (sticker_required=="Yes" and not is_short_pipeline) else "",
+            "piler_assigned": ", ".join(piler_nc) if piler_nc else "",
+            "coverer_assigned": ", ".join(coverer_nc) if coverer_nc else "",
+            "decorator_assigned": ", ".join(decorator_nc) if decorator_nc else "",
+            "skip_baking": "Yes" if needs_baking == "Already in inventory — skip baking" else "No",
             "order_created_at": now_iso(), "last_updated_at": now_iso(), "last_updated_by": created_by.strip(),
         })
         if video_records:
@@ -3119,6 +3195,13 @@ def render_customer_care():
                 conn.commit()
         create_notification(order_id, "Finance", None,
                              f"💰 New order {order_id} ({customer_name.strip()}) needs {next_action.lower()}.")
+        try:
+            fresh_df = load_orders()
+            new_row = fresh_df[fresh_df["order_id"] == order_id]
+            if not new_row.empty:
+                sync_order_to_sheet(new_row.iloc[0])
+        except Exception:
+            pass  # sheet sync issues should never block order creation
         st.success(f"Order {order_id} created ({order_quantity} unit(s), total UGX {total_price:,.0f}) and sent to Finance."
                    + (" Fulfilled from cookie inventory." if sold_from_inventory == "Yes" else ""))
         clear_draft_field("nc_customer_name")
@@ -4755,6 +4838,10 @@ def render_order_gallery(df, title="🖼️ All Active Orders"):
             has_image = render_reference_images(cake_row)
             if not has_image:
                 st.caption("No reference image was uploaded for this order.")
+            can_see_price = st.session_state.get("department") in (
+                "Customer Care", "Packaging", "Finance", "Procurement", "Owner / Admin"
+            )
+            price_line = f"Price: {fmt_ugx(cake_row.get('price_ugx'))}  Balance: {fmt_ugx(cake_row.get('balance'))}\n" if can_see_price else ""
             details_text = (
                 f"Order: {cake_row.get('order_id')}\n"
                 f"Customer: {disp(cake_row.get('customer_name'))}  Phone: {disp(cake_row.get('customer_number'))}\n"
@@ -4764,7 +4851,7 @@ def render_order_gallery(df, title="🖼️ All Active Orders"):
                 f"Size: {disp(cake_row.get('cake_size_value'))}\"  Shape: {disp(cake_row.get('cake_shape'))}\n"
                 f"Icing/Finish: {disp(cake_row.get('icing_type'))}\n"
                 f"Design Notes: {disp(cake_row.get('design_description'))}\n"
-                f"Price: {fmt_ugx(cake_row.get('price_ugx'))}  Balance: {fmt_ugx(cake_row.get('balance'))}\n"
+                f"{price_line}"
                 f"Due: {disp(cake_row.get('due_date'))} at {disp(cake_row.get('expected_time'))}\n"
                 f"Currently at: {disp(cake_row.get('workflow_status'))}\n"
                 f"Urgency: {disp(cake_row.get('urgency_level'))}"
@@ -5896,6 +5983,95 @@ def send_daily_report_email(to_address="cakealbum@gmail.com", report_date=None):
         return False, f"Failed to send: {type(e).__name__}: {e}"
 
 
+def get_sheet_client():
+    """Connects to Google Sheets using a service account. Reads the key file path from
+    GOOGLE_SHEETS_CREDENTIALS_FILE and the target sheet name from GOOGLE_SHEETS_NAME -
+    both environment variables, same pattern as the email setup. Returns (worksheet, error_message)."""
+    if not GSPREAD_AVAILABLE:
+        return None, "The gspread and google-auth packages aren't installed on this server yet. See the setup guide."
+    creds_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS_FILE")
+    sheet_name = os.environ.get("GOOGLE_SHEETS_NAME")
+    if not creds_path or not sheet_name:
+        return None, "Google Sheets isn't set up yet - GOOGLE_SHEETS_CREDENTIALS_FILE and GOOGLE_SHEETS_NAME environment variables aren't set. See the setup guide."
+    if not Path(creds_path).exists():
+        return None, f"Credentials file not found at {creds_path}."
+    try:
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = GoogleCredentials.from_service_account_file(creds_path, scopes=scopes)
+        client = gspread.authorize(creds)
+        sheet = client.open(sheet_name).sheet1
+        return sheet, None
+    except Exception as e:
+        return None, f"Couldn't connect to Google Sheets: {type(e).__name__}: {e}"
+
+
+SHEET_SYNC_COLUMNS = [
+    "order_id", "customer_name", "customer_number", "product_type", "cake_category",
+    "flavours", "cake_size_value", "cake_shape", "price_ugx", "balance", "payment_arrangement",
+    "order_type", "urgency_level", "due_date", "workflow_status", "order_created_at",
+]
+
+
+def sync_order_to_sheet(order_row):
+    """Appends a single order to the Google Sheet as a new row. Called right after an
+    order is created. Fails silently (logged, not shown to the person creating the order)
+    since a sync hiccup shouldn't block someone from placing a real order - Procurement,
+    Finance, etc. all still work normally from the database regardless of sheet sync status."""
+    sheet, error = get_sheet_client()
+    if error:
+        print(f"[SHEETS SYNC] Skipped - {error}", flush=True)
+        return False, error
+    try:
+        row = [str(order_row.get(c, "")) for c in SHEET_SYNC_COLUMNS]
+        sheet.append_row(row)
+        return True, None
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        print(f"[SHEETS SYNC] Failed for {order_row.get('order_id')}: {err}", flush=True)
+        return False, err
+
+
+def render_sheets_sync_panel():
+    st.markdown("## 📊 Google Sheets Sync")
+    st.caption("Every new order created in the app is automatically sent to your Google Sheet as it happens. "
+               "Use the button below to catch up any orders placed before this was set up.")
+    sheet, error = get_sheet_client()
+    if error:
+        st.warning(error)
+    else:
+        st.success(f"Connected to Google Sheets — appending new orders automatically.")
+    if st.button("📤 Sync All Existing Orders Now (catch-up)", width='stretch'):
+        df = load_orders()
+        if df.empty:
+            st.info("No orders to sync.")
+        else:
+            sheet2, error2 = get_sheet_client()
+            if error2:
+                st.error(error2)
+            else:
+                with st.spinner(f"Syncing {len(df)} order(s)..."):
+                    existing_ids = set()
+                    try:
+                        existing_rows = sheet2.get_all_values()
+                        header = existing_rows[0] if existing_rows else []
+                        if "order_id" in header:
+                            id_col = header.index("order_id")
+                            existing_ids = {r[id_col] for r in existing_rows[1:] if len(r) > id_col}
+                    except Exception:
+                        pass
+                    to_sync = df[~df["order_id"].isin(existing_ids)] if existing_ids else df
+                    rows = [[str(r.get(c, "")) for c in SHEET_SYNC_COLUMNS] for _, r in to_sync.iterrows()]
+                    failed = 0
+                    if rows:
+                        try:
+                            sheet2.append_rows(rows)
+                        except Exception as e:
+                            failed = len(rows)
+                            st.error(f"Bulk sync failed: {type(e).__name__}: {e}")
+                    if failed == 0:
+                        st.success(f"Synced {len(rows)} order(s) to the sheet ({len(df) - len(rows)} were already there).")
+
+
 def render_daily_report_panel():
     st.markdown("## 📧 Daily Report Email")
     st.caption("Today's sales, pending balances, and drivers still holding unreconciled cash — sent as one email.")
@@ -5986,6 +6162,7 @@ def render_admin():
     render_staff_accounts()
     render_push_subscription_admin()
     render_daily_report_panel()
+    render_sheets_sync_panel()
     st.markdown("## 🔧 Operational Detail")
     c1,c2,c3,c4 = st.columns(4)
     with c1: kpi("Orders", f"{len(df):,}")
