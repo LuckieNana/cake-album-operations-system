@@ -388,7 +388,7 @@ p, span, div, label, .stMarkdown, [data-testid='stWidgetLabel'] p{color:var(--in
 [data-testid='stSidebar']{background:var(--plum-mid); border-right:1px solid rgba(0,0,0,.15);}
 [data-testid='stSidebar'] *{color:#FFFFFF!important;}
 [data-testid='stSidebar'] [data-testid='stCaptionContainer']{color:#EFE6F3!important;}
-[data-testid='stSidebar'] input,[data-testid='stSidebar'] div[data-baseweb='select']>div{background:#FFFFFF!important;color:var(--ink)!important; border-radius:8px!important;}
+[data-testid='stSidebar'] input,[data-testid='stSidebar'] textarea,[data-testid='stSidebar'] div[data-baseweb='select']>div{background:#FFFFFF!important;color:var(--ink)!important; border-radius:8px!important;}
 [data-testid='stSidebar'] hr{border-color:rgba(255,255,255,.14)!important;}
 [data-testid='stSidebar'] .stButton>button{background:rgba(255,255,255,.14)!important;box-shadow:none!important;border:1px solid rgba(255,255,255,.3)!important;font-weight:600!important;}
 [data-testid='stSidebar'] .stButton>button:hover{background:rgba(255,255,255,.24)!important;}
@@ -3346,6 +3346,7 @@ def render_finance():
                     }, by, "Order Payment Confirmed — Fulfilled From Inventory", "Finance")
                     create_notification(row.order_id, "Packaging", None,
                                          f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — payment confirmed, ready to package from inventory.")
+                    notify_topper_sticker_if_approved(row, by)
                     st.success("Payment confirmed — already baked, sent straight to Packaging.")
                 else:
                     update_order(row.order_id, {
@@ -3355,6 +3356,7 @@ def render_finance():
                     }, by, "Order Payment Confirmed", "Finance")
                     create_notification(row.order_id, "Production Planning", None,
                                          f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — payment confirmed, ready to plan production.")
+                    notify_topper_sticker_if_approved(row, by)
                     st.success("Payment confirmed.")
                 st.rerun()
 
@@ -3372,6 +3374,7 @@ def render_finance():
                     }, by, "No Deposit Order Approved — Fulfilled From Inventory", "Finance")
                     create_notification(row.order_id, "Packaging", None,
                                          f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — approved for pay-on-delivery, ready to package from inventory.")
+                    notify_topper_sticker_if_approved(row, by)
                     st.success("Approved — already baked, sent straight to Packaging.")
                 else:
                     update_order(row.order_id, {
@@ -3380,6 +3383,7 @@ def render_finance():
                     }, by, "No Deposit Order Approved", "Finance")
                     create_notification(row.order_id, "Production Planning", None,
                                          f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — approved for pay-on-delivery, ready to plan production.")
+                    notify_topper_sticker_if_approved(row, by)
                     st.success("Approved and released to Production Planning.")
                 st.rerun()
             if b.button("❌ Hold Order", width='stretch'):
@@ -4761,7 +4765,8 @@ def render_design_innovation():
     st.divider()
 
     df=load_orders()
-    q=df[col(df,"topper_required")=="Yes"].copy()
+    PRE_FINANCE_APPROVAL_STATUSES = ["Awaiting Payment Confirmation", "Awaiting Deposit", "Payment Approval Required", "Payment Hold"]
+    q=df[(col(df,"topper_required")=="Yes") & (~df["workflow_status"].isin(PRE_FINANCE_APPROVAL_STATUSES))].copy()
     if q.empty:
         st.info("No topper tasks.")
     else:
@@ -4796,7 +4801,7 @@ def render_design_innovation():
                 st.success(f"Topper ready. {decorator} notified."); st.rerun()
 
     st.divider()
-    sq = df[col(df,"sticker_required")=="Yes"].copy()
+    sq = df[(col(df,"sticker_required")=="Yes") & (~df["workflow_status"].isin(PRE_FINANCE_APPROVAL_STATUSES))].copy()
     if sq.empty:
         st.info("No sticker tasks.")
     else:
