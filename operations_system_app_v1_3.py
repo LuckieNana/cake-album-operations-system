@@ -4176,94 +4176,54 @@ def render_production_planning():
         bakers,pilers,coverers,decorators,_ = staff_lists()
         ptype = row.get("product_type") or "Cake"
         is_short_pipeline = ptype in SHORT_PIPELINE_PRODUCTS
-        st.markdown("### Fresh Production Assignment")
-        st.caption("Baking team breakdown: who's in charge, who's mixing, and who's on the oven for this job.")
+        st.markdown("### Baker Assignment")
+        st.caption("Piler, coverer, decorator, topper, and sticker are already assigned from Customer Care when the order "
+                   "was created — this step is only for picking who bakes it.")
+        existing_piler = disp(row.get("piler_assigned"))
+        existing_coverer = disp(row.get("coverer_assigned"))
+        existing_decorator = disp(row.get("decorator_assigned"))
+        if not is_short_pipeline:
+            st.info(f"Already assigned — Piler: {existing_piler} · Coverer: {existing_coverer} · Decorator: {existing_decorator}")
+        a, b = st.columns(2)
+        baker = a.selectbox("Baker (In Charge)", bakers, format_func=first_name)
+        by = b.text_input("Updated by", value="Production Manager")
+        mixer = st.multiselect("Mixer(s)", bakers, format_func=first_name, key="pp_mixer_multi")
+        oven_person = st.multiselect("Oven Person(s)", bakers, format_func=first_name, key="pp_oven_multi")
         if is_short_pipeline:
-            a, b = st.columns(2)
-            baker = a.selectbox("Baker (In Charge)", bakers, format_func=first_name)
-            by = b.text_input("Updated by", value="Production Manager")
-            mixer = st.multiselect("Mixer(s)", bakers, format_func=first_name, key="pp_mixer_multi")
-            oven_person = st.multiselect("Oven Person(s)", bakers, format_func=first_name, key="pp_oven_multi")
             st.info(f"{PRODUCT_BADGE.get(ptype, ('',''))[0]} order — goes straight from Baking to Packaging, so only baking roles are needed here.")
-            piler, coverer, decorator = "N/A", "N/A", "N/A"
-            centerpiece_team, side_cake_team = [], []
-            topper_owner = "N/A"
-        else:
-            a, b = st.columns(2)
-            baker = a.selectbox("Baker (In Charge)", bakers, format_func=first_name)
-            by = b.text_input("Updated by", value="Production Manager")
-            mixer = st.multiselect("Mixer(s)", bakers, format_func=first_name, key="pp_mixer_multi")
-            oven_person = st.multiselect("Oven Person(s)", bakers, format_func=first_name, key="pp_oven_multi")
-            piler = st.multiselect("Piler(s)", pilers, format_func=first_name, key="pp_piler_multi")
-            coverer = st.multiselect("Coverer(s)", coverers, format_func=first_name, key="pp_coverer_multi")
-            decorator = st.multiselect("Decorator(s)", decorators, format_func=first_name, key="pp_decorator_multi")
-            centerpiece_team, side_cake_team = [], []
-            if str(row.get("is_multi_tier")) == "Yes":
-                st.markdown("### 💍 Wedding Cake Team Split")
-                st.caption("Assign a separate team to the centerpiece versus the side cakes — 2 or 3 people on each is fine.")
-                centerpiece_team = st.multiselect("Centerpiece Team (2-3 people)", decorators, format_func=first_name, key="pp_centerpiece_team")
-                side_cake_team = st.multiselect("Side Cake Team (2-3 people)", decorators, format_func=first_name, key="pp_side_cake_team")
-            topper_owner = "Keith"
-            if str(row.get("topper_required")) == "Yes":
-                st.markdown("### 🎨 Design & Innovation / Topper Assignment")
-                st.info(f"Topper wording: {disp(row.get('topper_wording'))}")
-                st.caption(f"Topper notes: {disp(row.get('topper_notes'))}")
-                topper_owner = st.text_input("Topper assigned to", value="Keith", key="pp_topper_owner")
-                target = topper_target_datetime(row)
-                if target is not None:
-                    st.warning(f"Topper target: {target.strftime('%Y-%m-%d %I:%M %p')} — 2 hours before cake due time.")
-            sticker_owner = "Doreen"
-            if str(row.get("sticker_required")) == "Yes":
-                st.markdown("### 🏷️ Sticker Assignment")
-                st.caption(f"Sticker notes: {disp(row.get('sticker_notes'))}")
-                sticker_owner = st.text_input("Sticker assigned to", value="Doreen", key="pp_sticker_owner")
-        if st.button("Assign Full Production Team", width='stretch'):
-            piler_val = ", ".join(piler) if isinstance(piler, list) else piler
-            coverer_val = ", ".join(coverer) if isinstance(coverer, list) else coverer
-            decorator_val = ", ".join(decorator) if isinstance(decorator, list) else decorator
+        centerpiece_team, side_cake_team = [], []
+        if str(row.get("is_multi_tier")) == "Yes":
+            st.markdown("### 💍 Wedding Cake Team Split")
+            st.caption("Assign a separate team to the centerpiece versus the side cakes — 2 or 3 people on each is fine.")
+            centerpiece_team = st.multiselect("Centerpiece Team (2-3 people)", decorators, format_func=first_name, key="pp_centerpiece_team")
+            side_cake_team = st.multiselect("Side Cake Team (2-3 people)", decorators, format_func=first_name, key="pp_side_cake_team")
+        if st.button("Assign Baker", width='stretch'):
             mixer_val = ", ".join(mixer) if isinstance(mixer, list) else mixer
             oven_val = ", ".join(oven_person) if isinstance(oven_person, list) else oven_person
             centerpiece_val = ", ".join(centerpiece_team) if isinstance(centerpiece_team, list) else centerpiece_team
             side_cake_val = ", ".join(side_cake_team) if isinstance(side_cake_team, list) else side_cake_team
             update_order(row.order_id, {
                 "baker_assigned":baker, "mixer_assigned":mixer_val, "oven_person_assigned":oven_val,
-                "piler_assigned":piler_val, "coverer_assigned":coverer_val, "decorator_assigned":decorator_val,
                 "centerpiece_team_assigned":centerpiece_val, "side_cake_team_assigned":side_cake_val,
                 "workflow_status":"Production Planned", "current_owner":"Baking", "next_action":"Start baking",
                 "production_planned_at":now_iso(), "baking_status":"Not Started", "decoration_status":"Not Started",
-            }, by, "Production Team Assigned", "Production Planning")
+            }, by, "Baker Assigned", "Production Planning")
             create_notification(row.order_id, "Baking", baker,
                                  f"🎂 {row.order_id} ({disp(row.get('customer_name'))}) has been assigned to you for baking.")
             due_str = disp(row.get("due_date"))
-            if piler_val:
-                create_notification(row.order_id, "Filling / Piling", piler_val,
+            if existing_piler != "—":
+                create_notification(row.order_id, "Filling / Piling", row.get("piler_assigned"),
                                      f"📅 Heads up — {row.order_id} ({disp(row.get('customer_name'))}) is coming your way for piling. "
                                      f"Currently at Baking, due {due_str}. Check '📅 Incoming Workload' for the full picture.")
-            if coverer_val:
-                create_notification(row.order_id, "Coating / Covering", coverer_val,
+            if existing_coverer != "—":
+                create_notification(row.order_id, "Coating / Covering", row.get("coverer_assigned"),
                                      f"📅 Heads up — {row.order_id} ({disp(row.get('customer_name'))}) is coming your way for covering. "
                                      f"Currently at Baking, due {due_str}. Check '📅 Incoming Workload' for the full picture.")
-            if decorator_val:
-                create_notification(row.order_id, "Decoration", decorator_val,
+            if existing_decorator != "—":
+                create_notification(row.order_id, "Decoration", row.get("decorator_assigned"),
                                      f"📅 Heads up — {row.order_id} ({disp(row.get('customer_name'))}) is coming your way for decoration. "
                                      f"Currently at Baking, due {due_str}. Check '📅 Incoming Workload' for the full picture.")
-            if str(row.get("topper_required")) == "Yes":
-                target = topper_target_datetime(row)
-                update_order(row.order_id, {
-                    "topper_assigned_to":topper_owner, "topper_status":"Assigned",
-                    "topper_target_at":target.isoformat() if target is not None else None,
-                    "topper_pickup_note":f"Topper assigned to {topper_owner}"
-                }, by, "Topper Assigned", "Production Planning")
-                create_notification(row.order_id,"Design & Innovation",topper_owner,
-                                    f"New topper assignment. Words: {disp(row.get('topper_wording'))}. Decorator: {decorator_val}.")
-            if str(row.get("sticker_required")) == "Yes":
-                update_order(row.order_id, {
-                    "sticker_assigned_to":sticker_owner, "sticker_status":"Assigned",
-                    "sticker_pickup_note":f"Sticker assigned to {sticker_owner}"
-                }, by, "Sticker Assigned", "Production Planning")
-                create_notification(row.order_id,"Design & Innovation",sticker_owner,
-                                    f"🏷️ New sticker assignment for {row.order_id}. Notes: {disp(row.get('sticker_notes'))}. Decorator: {decorator_val}.")
-            st.success("Production team assigned."); st.rerun()
+            st.success("Baker assigned."); st.rerun()
 
     st.divider()
     st.markdown("## 🧁 Extra Cake Layers for the Day (Abrupt/Buffer Stock)")
