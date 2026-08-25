@@ -2269,13 +2269,13 @@ def _ai_context_snapshot(order_id=None, max_orders=60):
         return "No order data available."
     if df is None or df.empty:
         return "There are no orders in the system."
-    cols = [c for c in ["order_id", "customer_name", "product_type", "flavour", "cake_size_value",
-                        "workflow_status", "delivery_date", "urgency", "assigned_baker",
-                        "assigned_piler", "assigned_coverer", "assigned_decorator", "assigned_driver"]
+    cols = [c for c in ["order_id", "customer_name", "product_type", "flavours", "cake_size_value",
+                        "workflow_status", "due_date", "urgency_level", "baker_assigned",
+                        "piler_assigned", "coverer_assigned", "decorator_assigned", "driver_assigned"]
             if c in df.columns]
     live = df
     if "workflow_status" in df.columns:
-        live = df[~df["workflow_status"].fillna("").isin(["Delivered", "Cancelled", "Completed"])]
+        live = df[df["workflow_status"].fillna("") != "Follow-up Done"]
     lines = []
     if "workflow_status" in df.columns:
         counts = df["workflow_status"].fillna("Unknown").value_counts().head(20)
@@ -3724,6 +3724,17 @@ def render_finance():
                                          f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — payment confirmed, ready to package from inventory.")
                     notify_topper_sticker_if_approved(row, by)
                     st.success("Payment confirmed — already baked, sent straight to Packaging.")
+                elif row.get("skip_baking") == "Yes":
+                    update_order(row.order_id, {
+                        "workflow_status":"Piling Incoming", "current_owner":"Filling / Piling",
+                        "next_action":"Piler to accept — abrupt order, baking skipped, from inventory flavours",
+                        "payment_status":"Confirmed",
+                        "finance_confirmation_status":"Confirmed" if float(row.get("balance") or 0) == 0 else "Pending"
+                    }, by, "Order Payment Confirmed — Baking Skipped, Straight to Piling", "Finance")
+                    create_notification(row.order_id, "Filling / Piling", row.get("piler_assigned"),
+                                         f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — payment confirmed. Abrupt order, baking skipped, ready to pile now.")
+                    notify_topper_sticker_if_approved(row, by)
+                    st.success("Payment confirmed — abrupt order from inventory, baking skipped, sent straight to Piling.")
                 else:
                     update_order(row.order_id, {
                         "workflow_status":"Deposit Confirmed", "current_owner":"Production Planning",
@@ -3752,6 +3763,16 @@ def render_finance():
                                          f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — approved for pay-on-delivery, ready to package from inventory.")
                     notify_topper_sticker_if_approved(row, by)
                     st.success("Approved — already baked, sent straight to Packaging.")
+                elif row.get("skip_baking") == "Yes":
+                    update_order(row.order_id, {
+                        "workflow_status":"Piling Incoming", "current_owner":"Filling / Piling",
+                        "next_action":"Piler to accept — abrupt order, baking skipped, from inventory flavours",
+                        "payment_status":"Approved for Pay on Delivery"
+                    }, by, "No Deposit Order Approved — Baking Skipped, Straight to Piling", "Finance")
+                    create_notification(row.order_id, "Filling / Piling", row.get("piler_assigned"),
+                                         f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — approved for pay-on-delivery. Abrupt order, baking skipped, ready to pile now.")
+                    notify_topper_sticker_if_approved(row, by)
+                    st.success("Approved — abrupt order from inventory, baking skipped, sent straight to Piling.")
                 else:
                     update_order(row.order_id, {
                         "workflow_status":"Deposit Confirmed", "current_owner":"Production Planning",
