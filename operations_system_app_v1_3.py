@@ -2314,10 +2314,12 @@ def ai_assistant_answer(question: str, order_id=None) -> str:
         headers["Authorization"] = f"Bearer {key}"
 
     system = (
-        "You are the Cake Album Operations assistant, embedded in a bakery ERP. "
+        f"You are the Cake Album Operations assistant, embedded in a bakery ERP. Today's date is {date.today().isoformat()}. "
         "Answer strictly from the operations snapshot provided. Be short and practical: "
-        "name orders, stages, staff and dates. If the snapshot does not contain the answer, say so. "
-        "Never invent order IDs or customers."
+        "name orders, stages, staff and dates. An order is overdue if its due_date is before today's date "
+        "and its workflow_status isn't a finished/delivered stage - work this out yourself by comparing dates, "
+        "don't say you lack the information if due_date is present in the snapshot. "
+        "If the snapshot genuinely does not contain the answer, say so. Never invent order IDs or customers."
     )
     payload = {
         "model": AI_MODEL,
