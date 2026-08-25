@@ -610,15 +610,18 @@ def page_header(title: str, subtitle: str = ""):
     render_department_notifications()
     render_team_chat()
     render_idea_submission_widget()
+    st.caption("If this page has been open a while, tap the button below to make sure you're seeing "
+               "the latest assignments before acting on anything.")
+    render_auto_refresh_toggle(key_suffix="_top")
 
 
-def render_auto_refresh_toggle():
+def render_auto_refresh_toggle(key_suffix=""):
     """Manual refresh for queue tables and order data. Notifications themselves are already
     handled independently and reliably by the fragment above (refreshes every 10s on its own,
     without reloading the page) — this button is just for someone who wants to force queue
     tables to update right now, without the battery cost or visible flicker of an automatic
     full-page rerun every 30 seconds."""
-    if st.button("🔄 Check now", key=f"manual_refresh_btn_{st.session_state.get('_refresh_widget_calls', 0)}"):
+    if st.button("🔄 Check now", key=f"manual_refresh_btn{key_suffix}_{st.session_state.get('_refresh_widget_calls', 0)}"):
         st.session_state["_refresh_widget_calls"] = st.session_state.get("_refresh_widget_calls", 0) + 1
         st.rerun()
 
@@ -1828,13 +1831,13 @@ STAGE_MATERIALS = {
         "Corn Flour",  # decor-only
         "Chocolates", "Maimun Colors 240ml", "Maimun Colours 50ml", "Pradip",
         "Fondant", "Buttercream", "Waffle Paper", "Ice Cream Cones", "Pearls", "Candles", "Gold Leaves",
-        "Flowers", "Balls", "Palm Leaf", "Butterflies", "Crowns", "Topper Paper",
+        "Flowers", "Balls", "Palm Leaf", "Butterflies", "Crowns", "Topper Paper", "Ribbons",
         "Super Glue", "Scissors", "Cutters", "Rolling Pin",
         "Stickers", "Cake Album Stickers", "Cookie Stickers",
         "Other",
     ],
     "Packaging": ["Cake Boxes", "Wrapping Paper", "Envelopes", "Packing Bags", "Sticker", "Ribbon", "Bag", "Tape", "Other"],
-    "Design & Innovation": ["Super Glue", "Stick Glue", "Topper Paper", "Other"],
+    "Design & Innovation": ["Super Glue", "Stick Glue", "Topper Paper", "Sticker Paper", "Other"],
 }
 # Sort every material list alphabetically (ascending) for faster scanning — "Other" always stays
 # last since it's a fallback/free-text option, not a real item to pick from.
@@ -3226,6 +3229,11 @@ def render_customer_care():
             else:
                 st.caption("Type something above to search.")
 
+        st.markdown("#### 👑 HOD: Move a Cake to a Different Department or Person")
+        st.caption("If a cake needs to move somewhere it isn't currently sitting — for example from Baking straight to "
+                   "Piling — or needs reassigning to a different person, do that here.")
+        render_order_lookup_and_fix(df)
+
     st.markdown("### Product Line")
     product_type = st.selectbox("What is this order for?", PRODUCT_TYPES, key="nc_product_type",
                                  help="Cookies, Cake Loaves, Cake Layers, and Cupcakes skip Piling/Covering/Decoration/Studio QC and go straight from Baking to Packaging.")
@@ -4471,8 +4479,8 @@ def render_baking():
     page_header("🍰 Baking", "Bake layers, submit for baking check, and correct rejected cakes.")
     df = load_orders()
     render_hod_overview("Baking", df)
-    tab_batch, tab_assigned, tab_progress, tab_correction, tab_cakeinv, tab_cookieinv, tab_oven, tab_finished = st.tabs(
-        ["🧮 Batch Board", "Assigned", "In Progress", "Correction Required", "Baked Cake Inventory", "🍪 Baked Cookie Inventory", "🌡️ Oven Log", "✅ Finished Work"])
+    tab_batch, tab_assigned, tab_progress, tab_correction, tab_cakeinv, tab_cookieinv, tab_oven, tab_finished, tab_gallery = st.tabs(
+        ["🧮 Batch Board", "Assigned", "In Progress", "Correction Required", "Baked Cake Inventory", "🍪 Baked Cookie Inventory", "🌡️ Oven Log", "✅ Finished Work", "🖼️ All Orders"])
     with tab_assigned:
         assigned_q = filter_orders(df,["Production Planned"])
         assigned_q = assigned_q[assigned_q["baking_batch_number"].isna() | (assigned_q["baking_batch_number"] == "")] if not assigned_q.empty and "baking_batch_number" in assigned_q.columns else assigned_q
@@ -4882,13 +4890,16 @@ def render_baking():
     with tab_finished:
         render_finished_work_tab("Baking")
 
+    with tab_gallery:
+        render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
+
 
 def render_piling():
     page_header("🎂 Filling / Piling", "Accept baked cakes, pile to correct height, and send to Covering.")
     df = load_orders()
     render_hod_overview("Filling / Piling", df)
-    t0,t1,t2,t3,t4,t5,t6 = st.tabs(["📅 Incoming Workload", "Incoming from Baking", "In Progress", "Correction Required",
-                                  "End-of-Day Layer Reconciliation", "📋 End-of-Day Accountability", "✅ Finished Work"])
+    t0,t1,t2,t3,t4,t5,t6,t7 = st.tabs(["📅 Incoming Workload", "Incoming from Baking", "In Progress", "Correction Required",
+                                  "End-of-Day Layer Reconciliation", "📋 End-of-Day Accountability", "✅ Finished Work", "🖼️ All Orders"])
     with t0:
         pre_piling_statuses = ["Production Planned", "Baking", "Baking Correction Required"]
         render_incoming_workload_forecast(df, "piler_assigned", "Piler", pre_piling_statuses, "Incoming from Baking")
@@ -5027,12 +5038,15 @@ def render_piling():
     with t6:
         render_finished_work_tab("Filling / Piling")
 
+    with t7:
+        render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
+
 
 def render_covering():
     page_header("🧁 Coating / Covering", "Check piling/height, cover cake, then send to Decoration.")
     df = load_orders()
     render_hod_overview("Coating / Covering", df)
-    t0,t1,t2,t3,t4 = st.tabs(["📅 Incoming Workload", "Incoming from Piling", "In Progress", "Correction Required", "✅ Finished Work"])
+    t0,t1,t2,t3,t4,t5 = st.tabs(["📅 Incoming Workload", "Incoming from Piling", "In Progress", "Correction Required", "✅ Finished Work", "🖼️ All Orders"])
     with t0:
         pre_covering_statuses = ["Production Planned", "Baking", "Baking Correction Required",
                                   "Piling Incoming", "Piling", "Piling Correction Required"]
@@ -5103,6 +5117,9 @@ def render_covering():
 
     with t4:
         render_finished_work_tab("Coating / Covering")
+
+    with t5:
+        render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
 
 
 def render_design_innovation():
@@ -5375,7 +5392,7 @@ def render_decoration():
     page_header("🎨 Decoration", "Accept covering, receive topper handoffs, decorate, and send to Studio.")
     df = load_orders()
     render_hod_overview("Decoration", df)
-    t0,t1,t3,t4,t5 = st.tabs(["📅 Incoming Workload", "Incoming from Covering", "Decorating", "Correction Required", "✅ Finished Work"])
+    t0,t1,t3,t4,t5,t6 = st.tabs(["📅 Incoming Workload", "Incoming from Covering", "Decorating", "Correction Required", "✅ Finished Work", "🖼️ All Orders"])
     with t0:
         pre_decoration_statuses = ["Production Planned", "Baking", "Baking Correction Required",
                                     "Piling Incoming", "Piling", "Piling Correction Required",
@@ -5465,13 +5482,16 @@ def render_decoration():
     with t5:
         render_finished_work_tab("Decoration")
 
+    with t6:
+        render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
+
 
 def render_studio_qc():
     page_header("🔍 Final QC & Packaging", "One continuous platform: final quality control, packaging, delivery notes, and dispatch planning.")
     df = load_orders()
     render_hod_overview("Studio / Final QC", df)
-    qc_tab, packaging_tab, dispatch_tab, finished_tab = st.tabs(
-        ["Final QC", "Packaging & Delivery Notes", "Dispatch Planning", "✅ Finished Work"])
+    qc_tab, packaging_tab, dispatch_tab, finished_tab, gallery_tab = st.tabs(
+        ["Final QC", "Packaging & Delivery Notes", "Dispatch Planning", "✅ Finished Work", "🖼️ All Orders"])
     with qc_tab:
         check_q = filter_orders(df,["Studio Check"])
         render_queue_table(check_q, "Cakes Awaiting Final QC", ["decorator_assigned"])
@@ -5494,6 +5514,9 @@ def render_studio_qc():
         render_dispatch(show_header=False)
     with finished_tab:
         render_finished_work_tab("Studio / Final QC")
+
+    with gallery_tab:
+        render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
 
 
 def render_procurement():
@@ -5869,11 +5892,13 @@ def render_driver(show_header=True):
 def render_dispatch_driver():
     page_header("🚚 Delivery Department", "Plan dispatch runs and manage driver delivery from one clear workspace.")
     st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-    t1, t2 = st.tabs(["Dispatch Planning", "Driver Delivery"])
+    t1, t2, t3 = st.tabs(["Dispatch Planning", "Driver Delivery", "🖼️ All Orders"])
     with t1:
         render_dispatch()
     with t2:
         render_driver()
+    with t3:
+        render_order_gallery(load_orders(), "🖼️ All Orders — Images & Copyable Details")
 
 def render_followup_complaints_section(df):
     """Follow-up calls and complaint case tracking, now folded into Customer Care
@@ -7022,7 +7047,7 @@ def main():
         render_login(); return
     page = render_sidebar()
     PAGES[page]()
-    render_auto_refresh_toggle()
+    render_auto_refresh_toggle(key_suffix="_bottom")
 
 
 if __name__ == "__main__":
