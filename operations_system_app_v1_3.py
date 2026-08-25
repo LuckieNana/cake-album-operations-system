@@ -1125,11 +1125,16 @@ else:
     render_department_notifications = _render_department_notifications_body
 
 
+def _split_names(value):
+    return [n.strip() for n in str(value or "").split(",") if n.strip()]
+
+
 def _render_team_chat_body():
-    """An internal chat with real back-and-forth conversations: pick a colleague, see
-    the full thread of messages between you and them (both directions), and reply right
-    there. Each message still triggers a real push notification the same way order
-    notifications work. Lives in the sidebar so it's reachable from every page."""
+    """An internal chat with real back-and-forth conversations, including group chats:
+    pick one or more colleagues, see the full thread between everyone involved, and
+    reply right there - the reply automatically goes to everyone else in that same
+    conversation. Each message still triggers a real push notification to everyone
+    it's addressed to. Lives in the sidebar so it's reachable from every page."""
     my_username = st.session_state.get("username", "").strip()
     my_name = st.session_state.get("staff_name", "").strip()
     if not my_username:
@@ -1141,56 +1146,74 @@ def _render_team_chat_body():
 
     msgs = load_table("team_chat_messages")
     my_name_lower = my_name.lower()
-    involving_me = msgs[
-        (msgs["recipient"].astype(str).str.strip().str.lower() == my_name_lower) |
-        (msgs["sender"].astype(str).str.strip().str.lower() == my_name_lower)
-    ] if not msgs.empty else msgs
-    unread_to_me = msgs[
-        (msgs["recipient"].astype(str).str.strip().str.lower() == my_name_lower) &
-        (msgs["read_at"].isna() | (msgs["read_at"] == ""))
-    ] if not msgs.empty else msgs
+
+    def _am_i_recipient(row):
+        return any(r.lower() == my_name_lower for r in _split_names(row["recipient"]))
+
+    def _involves_me(row):
+        return str(row["sender"]).strip().lower() == my_name_lower or _am_i_recipient(row)
+
+    def _conversation_key(row):
+        # Everyone in this message besides me - sorted so the same group of people
+        # always lands on the same thread, regardless of who happens to send any
+        # particular message within it.
+        everyone = set([str(row["sender"]).strip()] + _split_names(row["recipient"]))
+        everyone.discard(my_name)
+        return tuple(sorted(everyone))
+
+    involving_me = msgs[msgs.apply(_involves_me, axis=1)].copy() if not msgs.empty else msgs
+    unread_to_me = msgs[msgs.apply(_am_i_recipient, axis=1) & (msgs["read_at"].isna() | (msgs["read_at"] == ""))] if not msgs.empty else msgs
     unread_count = len(unread_to_me)
-    unread_by_partner = unread_to_me.groupby("sender").size().to_dict() if not unread_to_me.empty else {}
 
-    # Figure out who I've ever exchanged messages with, most recent conversation first.
-    partner_last_activity = {}
-    for _, m in involving_me.iterrows():
-        other = str(m["sender"]).strip() if str(m["sender"]).strip().lower() != my_name_lower else str(m["recipient"]).strip()
-        if other and (other not in partner_last_activity or m["created_at"] > partner_last_activity[other]):
-            partner_last_activity[other] = m["created_at"]
-    partner_list = sorted(partner_last_activity.keys(), key=lambda p: partner_last_activity[p], reverse=True)
+    if not involving_me.empty:
+        involving_me["_conv_key"] = involving_me.apply(_conversation_key, axis=1)
 
-    # Real option values are always just the person's name (stable across reruns) -
-    # the "(N new)" text is display-only via format_func, so a message being marked
-    # read mid-session never invalidates whatever the selectbox currently has stored.
+    unread_by_conv = {}
+    if not unread_to_me.empty:
+        for _, m in unread_to_me.iterrows():
+            key = _conversation_key(m)
+            unread_by_conv[key] = unread_by_conv.get(key, 0) + 1
+
+    conv_last_activity = {}
+    if not involving_me.empty:
+        for _, m in involving_me.iterrows():
+            key = m["_conv_key"]
+            if key not in conv_last_activity or m["created_at"] > conv_last_activity[key]:
+                conv_last_activity[key] = m["created_at"]
+    conv_keys_sorted = sorted(conv_last_activity.keys(), key=lambda k: conv_last_activity[k], reverse=True)
+
+    # Real option values are always the stable tuple of names (never includes the
+    # unread count) - format_func handles the "(N new)" display text separately, so a
+    # message being marked read mid-session never invalidates the current selection.
     new_convo_value = "__new__"
-    dropdown_values = [new_convo_value] + partner_list
+    dropdown_values = [new_convo_value] + conv_keys_sorted
 
-    def _format_partner_option(value):
+    def _format_conv_option(value):
         if value == new_convo_value:
             return "+ New conversation"
-        n = unread_by_partner.get(value, 0)
-        return f"{first_name(value)} ({n} new)" if n else first_name(value)
+        names = ", ".join(first_name(n) for n in value)
+        n = unread_by_conv.get(value, 0)
+        return f"{names} ({n} new)" if n else names
 
     with st.sidebar:
         st.markdown("---")
         header = f"💬 Team Chat ({unread_count} new)" if unread_count else "💬 Team Chat"
         with st.expander(header, expanded=(unread_count > 0)):
-            if "chat_partner_pick" not in st.session_state and len(dropdown_values) > 1:
-                st.session_state["chat_partner_pick"] = dropdown_values[1]
-            chat_partner = st.selectbox("Conversation", dropdown_values, format_func=_format_partner_option, key="chat_partner_pick")
-            if chat_partner == new_convo_value:
-                chat_partner = st.selectbox("Start a new conversation with", people, key="chat_new_recipient") if people else None
+            if "chat_conv_pick" not in st.session_state and len(dropdown_values) > 1:
+                st.session_state["chat_conv_pick"] = dropdown_values[1]
+            chat_conv = st.selectbox("Conversation", dropdown_values, format_func=_format_conv_option, key="chat_conv_pick")
+
+            if chat_conv == new_convo_value:
+                chosen = st.multiselect("Start a conversation with (pick one or more)", people, key="chat_new_recipients")
+                chat_conv = tuple(sorted(chosen)) if chosen else None
                 if not people:
                     st.caption("No other active staff found to message.")
 
             thread = pd.DataFrame()
-            if chat_partner:
-                thread = involving_me[
-                    (involving_me["sender"].astype(str).str.strip() == chat_partner) |
-                    (involving_me["recipient"].astype(str).str.strip() == chat_partner)
-                ].sort_values("created_at")
-                st.markdown(f"**Conversation with {first_name(chat_partner)}**")
+            if chat_conv:
+                thread = involving_me[involving_me["_conv_key"] == chat_conv].sort_values("created_at") if not involving_me.empty else involving_me
+                names_label = ", ".join(first_name(n) for n in chat_conv)
+                st.markdown(f"**Conversation with {names_label}**")
                 if thread.empty:
                     st.caption("No messages yet — say hello below.")
                 else:
@@ -1200,7 +1223,7 @@ def _render_team_chat_body():
                         st.markdown(f"**{who}** · {m['created_at']}")
                         st.caption(m["message"])
                     unread_ids = thread[
-                        (thread["sender"].astype(str).str.strip() == chat_partner) &
+                        thread.apply(_am_i_recipient, axis=1) &
                         (thread["read_at"].isna() | (thread["read_at"] == ""))
                     ]["id"].tolist()
                     if unread_ids:
@@ -1215,12 +1238,13 @@ def _render_team_chat_body():
                 if st.button("Send", key="chat_send_btn", width='stretch'):
                     if message_text.strip():
                         last_id = int(thread.iloc[-1]["id"]) if not thread.empty else None
+                        recipient_str = ", ".join(chat_conv)
                         with connect() as conn:
                             conn.execute("""INSERT INTO team_chat_messages(sender, sender_department, recipient, message, created_at, reply_to_id)
                                             VALUES(?,?,?,?,?,?)""",
-                                         (my_name, st.session_state.get("department"), chat_partner, message_text.strip(), now_iso(), last_id))
+                                         (my_name, st.session_state.get("department"), recipient_str, message_text.strip(), now_iso(), last_id))
                             conn.commit()
-                        send_push_to_people([chat_partner], f"💬 New message from {my_name}", message_text.strip())
+                        send_push_to_people(list(chat_conv), f"💬 New message from {my_name}", message_text.strip())
                         st.session_state["chat_message_gen"] = msg_gen + 1
                         st.rerun()
                     else:
@@ -1228,7 +1252,7 @@ def _render_team_chat_body():
 
 
 if hasattr(st, "fragment"):
-    render_team_chat = st.fragment(run_every="10s")(_render_team_chat_body)
+    render_team_chat = st.fragment(run_every="30s")(_render_team_chat_body)
 else:
     render_team_chat = _render_team_chat_body
 
