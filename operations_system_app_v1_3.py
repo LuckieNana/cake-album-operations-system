@@ -12,6 +12,12 @@ import uuid
 import hashlib
 import base64
 import os
+try:
+    import socket
+    import urllib3.util.connection as _urllib3_cn
+    _urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
+except Exception:
+    pass  # if urllib3 isn't available yet for some reason, outbound calls just behave as before
 import smtplib
 try:
     import gspread
@@ -6467,26 +6473,31 @@ def build_daily_report_html(report_date=None):
 
 
 def send_daily_report_email(to_address="cakealbum@gmail.com", report_date=None):
-    """Sends the daily report via SMTP. Reads credentials from environment variables
-    (SMTP_EMAIL / SMTP_APP_PASSWORD) rather than storing them in code. Returns (success, message)
-    so the caller can show a clear result either way, instead of failing silently."""
-    smtp_email = os.environ.get("SMTP_EMAIL")
-    smtp_password = os.environ.get("SMTP_APP_PASSWORD")
-    if not smtp_email or not smtp_password:
-        return False, ("Email isn't set up yet on this server — SMTP_EMAIL and SMTP_APP_PASSWORD "
+    """Sends the daily report via Resend's HTTPS API rather than raw SMTP. DigitalOcean (and
+    most cloud hosts) block outbound SMTP ports 25/465/587 on every server by default to stop
+    spam abuse - this is a platform-level block, not something fixable from inside the server,
+    so sending over HTTPS (443, the same port all web traffic already uses and is never
+    blocked) is the standard way around it. Reads the key from RESEND_API_KEY and the sender
+    address from RESEND_FROM_EMAIL - both environment variables, same pattern as everything
+    else. Returns (success, message) so the caller can show a clear result either way."""
+    import requests
+    resend_key = os.environ.get("RESEND_API_KEY")
+    from_email = os.environ.get("RESEND_FROM_EMAIL")
+    if not resend_key or not from_email:
+        return False, ("Email isn't set up yet on this server — RESEND_API_KEY and RESEND_FROM_EMAIL "
                         "environment variables aren't set. See the setup guide.")
     html, summary = build_daily_report_html(report_date)
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Cake Album Daily Report — {summary['date']} — Sales {fmt_ugx(summary['total_sales'])}"
-    msg["From"] = smtp_email
-    msg["To"] = to_address
-    msg.attach(MIMEText(html, "html"))
+    subject = f"Cake Album Daily Report — {summary['date']} — Sales {fmt_ugx(summary['total_sales'])}"
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
-            server.starttls()
-            server.login(smtp_email, smtp_password)
-            server.sendmail(smtp_email, [to_address], msg.as_string())
-        return True, f"Report sent to {to_address}."
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+            json={"from": from_email, "to": [to_address], "subject": subject, "html": html},
+            timeout=20,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"Report sent to {to_address}."
+        return False, f"Failed to send: HTTP {resp.status_code}: {resp.text[:300]}"
     except Exception as e:
         return False, f"Failed to send: {type(e).__name__}: {e}"
 
@@ -6592,8 +6603,8 @@ def render_daily_report_panel():
     with c: kpi("Unreconciled (Drivers)", fmt_ugx(summary["unreconciled_total"]))
     with st.expander("Preview the report"):
         st.markdown(html, unsafe_allow_html=True)
-    if not os.environ.get("SMTP_EMAIL") or not os.environ.get("SMTP_APP_PASSWORD"):
-        st.warning("Email sending isn't configured on this server yet — see the setup guide to add SMTP_EMAIL and SMTP_APP_PASSWORD.")
+    if not os.environ.get("RESEND_API_KEY") or not os.environ.get("RESEND_FROM_EMAIL"):
+        st.warning("Email sending isn't configured on this server yet — see the setup guide to add RESEND_API_KEY and RESEND_FROM_EMAIL.")
     if st.button("📧 Send This Report Now", width='stretch'):
         with st.spinner("Sending..."):
             success, message = send_daily_report_email(to_addr.strip(), report_date)
