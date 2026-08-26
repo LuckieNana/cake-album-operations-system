@@ -6472,7 +6472,7 @@ def build_daily_report_html(report_date=None):
     return html, summary
 
 
-def send_daily_report_email(to_address="cakealbum@gmail.com", report_date=None):
+def send_daily_report_email(to_address="cakealbumug@gmail.com", report_date=None):
     """Sends the daily report via Resend's HTTPS API rather than raw SMTP. DigitalOcean (and
     most cloud hosts) block outbound SMTP ports 25/465/587 on every server by default to stop
     spam abuse - this is a platform-level block, not something fixable from inside the server,
@@ -6595,7 +6595,7 @@ def render_daily_report_panel():
     st.markdown("## 📧 Daily Report Email")
     st.caption("Today's sales, pending balances, and drivers still holding unreconciled cash — sent as one email.")
     report_date = st.date_input("Report date", value=date.today(), key="daily_report_date")
-    to_addr = st.text_input("Send to", value="cakealbum@gmail.com", key="daily_report_to")
+    to_addr = st.text_input("Send to", value="cakealbumug@gmail.com", key="daily_report_to")
     html, summary = build_daily_report_html(report_date)
     a, b, c = st.columns(3)
     with a: kpi("Sales Today", fmt_ugx(summary["total_sales"]))
