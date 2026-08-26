@@ -473,8 +473,41 @@ body *{visibility:hidden!important}
 """
 
 
+DARK_MODE_CSS_OVERRIDE = """
+<style>
+:root{
+  --ink:#EDE9F0!important; --canvas:#1A1420!important; --surface:#2A2130!important;
+  --border:#453A4E!important; --border-strong:#5A4C66!important; --plum-deep:#F0E6F5!important;
+  --muted:#B8ADC2!important; --muted-soft:#9891A0!important;
+  --success-bg:#173324!important; --warning-bg:#3A2C12!important; --danger-bg:#3A1A1A!important;
+}
+h1,h2,h3,h4{color:#F0E6F5!important;}
+[data-testid='stDataFrame'], [data-testid='stTable']{background:var(--surface)!important;}
+[data-testid='stExpander']{background:var(--surface)!important; border-color:var(--border)!important;}
+.stButton>button{background:var(--surface)!important; color:var(--ink)!important; border-color:var(--border-strong)!important;}
+[data-testid='stMetric']{background:var(--surface)!important;}
+</style>
+"""
+
+
 def inject_css():
     st.markdown(CSS, unsafe_allow_html=True)
+    if st.session_state.get("theme_mode") == "dark":
+        st.markdown(DARK_MODE_CSS_OVERRIDE, unsafe_allow_html=True)
+
+
+def render_theme_toggle():
+    """Dark mode is easier on the eyes at night and genuinely reduces battery drain on
+    phone OLED screens (dark pixels use meaningfully less power than light ones) -
+    stored in session_state so it holds for the rest of this session."""
+    current = st.session_state.get("theme_mode", "light")
+    with st.sidebar:
+        choice = st.radio("Appearance", ["☀️ Light", "🌙 Dark"], index=(1 if current == "dark" else 0),
+                           key="theme_toggle_radio", horizontal=True)
+        new_mode = "dark" if "Dark" in choice else "light"
+        if new_mode != current:
+            st.session_state["theme_mode"] = new_mode
+            st.rerun()
 
 
 DECORATOR_WEEK = {
@@ -1105,7 +1138,7 @@ def _render_department_notifications_body():
 # Poll only this notification area instead of refreshing the whole ERP page and
 # interrupting forms. On older Streamlit versions, it still works on normal reruns.
 if hasattr(st, "fragment"):
-    render_department_notifications = st.fragment(run_every="10s")(_render_department_notifications_body)
+    render_department_notifications = st.fragment(run_every="30s")(_render_department_notifications_body)
 else:
     render_department_notifications = _render_department_notifications_body
 
@@ -6729,6 +6762,7 @@ def render_login():
 
 
 def render_sidebar():
+    render_theme_toggle()
     st.sidebar.markdown(f"<img src='{LOGO_DATA_URI}' style='height:60px;width:auto;'>", unsafe_allow_html=True)
     st.sidebar.caption(APP_TAGLINE)
     st.sidebar.caption(APP_VERSION)
