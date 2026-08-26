@@ -1505,6 +1505,7 @@ def ensure_base_schema():
             cake_size_value REAL, cake_shape TEXT, total_layers_requested INTEGER, actual_layers_baked INTEGER,
             status TEXT DEFAULT 'Pending', assigned_baker TEXT, mixer_assigned TEXT, oven_person_assigned TEXT,
             created_by TEXT, created_at TEXT, baking_started_at TEXT, completed_at TEXT)""")
+        safe_add_column(conn, "baking_batches", "product_type", "TEXT DEFAULT 'Cake'")
         conn.execute("""CREATE TABLE IF NOT EXISTS baking_batch_orders(
             id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id INTEGER NOT NULL, order_id TEXT NOT NULL, layers_needed INTEGER,
             baked_status TEXT DEFAULT 'Pending', actual_layers_baked INTEGER, baked_at TEXT, baked_by TEXT)""")
@@ -4009,10 +4010,10 @@ def render_production_planning():
                "All the math happens here; bakers never see customer names or images, just the totals to bake.")
     planning_date = st.date_input("Planning for orders due on", value=date.today() + timedelta(days=1), key="pp_planning_date")
     batchable = filter_orders(df, ["Deposit Confirmed"])
-    batchable = batchable[batchable["product_type"] == "Cake"] if not batchable.empty and "product_type" in batchable.columns else batchable
+    batchable = batchable[batchable["order_type"] != "Urgent / Abrupt Order"] if not batchable.empty and "order_type" in batchable.columns else batchable
     batchable = batchable[batchable["due_date"].astype(str) == str(planning_date)] if not batchable.empty and "due_date" in batchable.columns else batchable
     if batchable.empty:
-        st.caption(f"No cake orders due on {planning_date.strftime('%d %b %Y')} are waiting to be grouped yet.")
+        st.caption(f"No orders due on {planning_date.strftime('%d %b %Y')} are waiting to be grouped yet.")
     else:
         # Decompose each order's flavour list (an order can have more than one flavour) so a
         # multi-flavour cake contributes its layers to EACH flavour it actually contains, not
@@ -4029,19 +4030,20 @@ def render_production_planning():
             share = layers_total / len(flavour_list)
             for fl in flavour_list:
                 exploded_rows.append({
-                    "order_id": orow["order_id"], "flavour": fl,
+                    "order_id": orow["order_id"], "product_type": orow.get("product_type") or "Cake", "flavour": fl,
                     "cake_size_value": orow.get("cake_size_value"), "cake_shape": orow.get("cake_shape"),
                     "layers_for_this_flavour": share,
                 })
         exploded = pd.DataFrame(exploded_rows)
-        st.caption("Cakes with more than one flavour split their layers evenly across each flavour they contain, so the totals below reflect what's actually being baked.")
-        summary = exploded.groupby(["flavour", "cake_size_value", "cake_shape"]).agg(
+        st.caption("Cakes with more than one flavour split their layers evenly across each flavour they contain, so the totals below reflect what's actually being baked. "
+                   "Cookies, cupcakes, loaves, and layers are grouped the same way — by product type, flavour, and size — so they never mix in with cake batches.")
+        summary = exploded.groupby(["product_type", "flavour", "cake_size_value", "cake_shape"]).agg(
             total_layers=("layers_for_this_flavour", "sum"), order_count=("order_id", "nunique"),
             order_ids=("order_id", lambda x: ", ".join(sorted(set(x))))).reset_index()
         summary["total_layers"] = summary["total_layers"].round(1)
         st.markdown(f"#### Ready to Group Into Batches — {planning_date.strftime('%d %b %Y')}")
-        table(summary, ["flavour", "cake_size_value", "cake_shape", "total_layers", "order_count", "order_ids"])
-        summary["group_label"] = summary.apply(lambda r: f"{r['flavour']} — {r['cake_size_value']:g}\" {r['cake_shape']} ({r['total_layers']:g} layers, {int(r['order_count'])} order(s))", axis=1)
+        table(summary, ["product_type", "flavour", "cake_size_value", "cake_shape", "total_layers", "order_count", "order_ids"])
+        summary["group_label"] = summary.apply(lambda r: f"{r['product_type']} — {r['flavour']} — {r['cake_size_value']:g}\" {r['cake_shape']} ({r['total_layers']:g} layers, {int(r['order_count'])} order(s))", axis=1)
         pick_label = st.selectbox("Select a group to turn into a batch", summary["group_label"].tolist(), key="pp_batch_pick")
         pick_row = summary[summary["group_label"] == pick_label].iloc[0]
         _bakers_b, _, _, _, _ = staff_lists()
@@ -4052,6 +4054,7 @@ def render_production_planning():
         batch_by = st.text_input("Planned by", value=st.session_state.get("staff_name", "Production Manager"), key="pp_batch_by")
         if st.button("🧮 Create Batch From This Group", width='stretch'):
             matching_rows = exploded[
+                (exploded["product_type"] == pick_row["product_type"]) &
                 (exploded["flavour"] == pick_row["flavour"]) &
                 (exploded["cake_size_value"] == pick_row["cake_size_value"]) &
                 (exploded["cake_shape"] == pick_row["cake_shape"])
@@ -4059,12 +4062,13 @@ def render_production_planning():
             batch_date_str = str(planning_date)
             with connect() as conn:
                 seq = conn.execute("SELECT COUNT(*) FROM baking_batches WHERE batch_date=?", (batch_date_str,)).fetchone()[0] + 1
+                type_slug = "".join(ch for ch in str(pick_row["product_type"])[:6] if ch.isalnum()) or "Item"
                 flavour_slug = "".join(ch for ch in str(pick_row["flavour"])[:10] if ch.isalnum()) or "Batch"
-                batch_number = f"B-{batch_date_str}-{flavour_slug}-{seq:02d}"
-                cur = conn.execute("""INSERT INTO baking_batches(batch_number, batch_date, flavour, cake_size_value, cake_shape,
+                batch_number = f"B-{batch_date_str}-{type_slug}-{flavour_slug}-{seq:02d}"
+                cur = conn.execute("""INSERT INTO baking_batches(batch_number, batch_date, product_type, flavour, cake_size_value, cake_shape,
                                     total_layers_requested, status, assigned_baker, mixer_assigned, oven_person_assigned, created_by, created_at)
-                                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                                   (batch_number, batch_date_str, pick_row["flavour"], pick_row["cake_size_value"], pick_row["cake_shape"],
+                                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                   (batch_number, batch_date_str, pick_row["product_type"], pick_row["flavour"], pick_row["cake_size_value"], pick_row["cake_shape"],
                                     round(pick_row["total_layers"]), "Pending", batch_baker, ", ".join(batch_mixer), ", ".join(batch_oven),
                                     batch_by, now_iso()))
                 batch_id = cur.lastrowid
@@ -4106,14 +4110,17 @@ def render_production_planning():
         st.markdown("#### Active Batches — Grouped by Day")
         st.caption("What bakers will see: date, batch number, and the exact flavour/size/layer breakdown — no customer names.")
         table(active_batches.sort_values(["batch_date", "flavour", "cake_size_value"]),
-              ["batch_date", "batch_number", "flavour", "cake_size_value", "cake_shape", "total_layers_requested",
+              ["batch_date", "batch_number", "product_type", "flavour", "cake_size_value", "cake_shape", "total_layers_requested",
                "assigned_baker", "status"])
     st.divider()
 
-    st.markdown("## 🎂 Individual Orders (exceptions, urgent, or non-cake items)")
-    st.caption("Cookies, cupcakes, loaves, layers, and any order needing individual handling still go through here — batching above is specifically for grouping regular multi-layer cakes.")
+    st.markdown("## 🚨 Urgent Orders (Skip Batch, Handle Individually)")
+    st.caption("Every regular order — cakes, cookies, cupcakes, loaves, and layers alike — now goes through the batch "
+               "grouping above. Only genuinely urgent or abrupt orders land here, since they can't wait for the next "
+               "scheduled batch and often need to be filled straight from existing inventory instead.")
     pp_queue = filter_orders(df,["Deposit Confirmed"])
-    render_queue_table(pp_queue, "Orders Awaiting Production Assignment")
+    pp_queue = pp_queue[(pp_queue["order_type"] == "Urgent / Abrupt Order") | (pp_queue["inventory_check_required"] == "Yes")] if not pp_queue.empty else pp_queue
+    render_queue_table(pp_queue, "Urgent Orders Awaiting Production Assignment")
     row = select_order(pp_queue, "pp_order")
     if row is not None:
         order_card(row)
@@ -4731,7 +4738,7 @@ def render_baking():
                 lambda i: f"{progress.get(int(i), (0, 0, 0))[0]} / {progress.get(int(i), (0, 0, 0))[2]}")
             board_view["flagged"] = board_view["id"].apply(lambda i: progress.get(int(i), (0, 0, 0))[1])
             table(board_view.sort_values(["batch_date", "flavour", "cake_size_value"]),
-                  ["batch_date", "batch_number", "flavour", "cake_size_value", "cake_shape",
+                  ["batch_date", "batch_number", "product_type", "flavour", "cake_size_value", "cake_shape",
                    "total_layers_requested", "cakes_baked", "flagged", "assigned_baker",
                    "mixer_assigned", "oven_person_assigned", "status"])
 
