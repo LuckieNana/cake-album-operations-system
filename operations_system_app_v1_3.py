@@ -2266,9 +2266,22 @@ def render_order_comments(order_id, key_suffix="", title="💬 Team Comments", e
                 f"<div style='white-space:pre-wrap;'>{_highlight_mentions(r['message'])}</div></div>",
                 unsafe_allow_html=True)
 
-        msg = st.text_area("Add a comment (use @name to notify someone)", key=f"{base}_msg", height=80)
-        cols = st.columns([1, 1, 3])
-        if cols[0].button("Post", key=f"{base}_post"):
+        # Keep the composer inside a form. Streamlit otherwise reruns the script while a
+        # phone user is interacting with the field, which can make the keyboard/cursor appear
+        # to "sleep" or disappear on low-end Android devices. A form holds the text locally
+        # until the worker explicitly taps Post or Ask AI. A single-line input is also much
+        # easier to focus reliably on a small touchscreen than the old text area.
+        with st.form(f"{base}_composer_form", clear_on_submit=True):
+            msg = st.text_input(
+                "Message / Ask AI",
+                placeholder="Tap here and type…  Use @name to notify someone",
+                key=f"{base}_msg",
+            )
+            cols = st.columns(2)
+            post_clicked = cols[0].form_submit_button("💬 Post", width='stretch')
+            ai_clicked = cols[1].form_submit_button("🤖 Ask AI", width='stretch')
+
+        if post_clicked:
             if not (msg or "").strip():
                 st.warning("Type something first.")
             else:
@@ -2281,9 +2294,9 @@ def render_order_comments(order_id, key_suffix="", title="💬 Team Comments", e
                     st.success(f"Posted — notified {', '.join(mentioned)}.")
                 else:
                     st.success("Posted.")
-                st.session_state.pop(f"{base}_msg", None)
                 st.rerun()
-        if cols[1].button("🤖 Ask AI", key=f"{base}_ai"):
+
+        if ai_clicked:
             if not (msg or "").strip():
                 st.warning("Type your question first.")
             else:
@@ -2292,7 +2305,6 @@ def render_order_comments(order_id, key_suffix="", title="💬 Team Comments", e
                 add_order_comment(order_id, msg.strip(), st.session_state.get("username", ""),
                                   st.session_state.get("staff_name", ""), st.session_state.get("department", ""))
                 add_order_comment(order_id, answer, "ai", "ERP Assistant", "", is_ai=True)
-                st.session_state.pop(f"{base}_msg", None)
                 st.rerun()
 
 
@@ -3458,27 +3470,47 @@ def render_customer_care():
                 label = f"{cname} — {cphone}" if cphone != "—" else cname
                 customer_options.append(label)
                 customer_lookup[label] = (cname, cphone if cphone != "—" else "")
-    customer_pick = st.selectbox("Customer", [customer_options[0]] + sorted(customer_options[1:]),
-                                  key="nc_customer_pick")
-    if customer_pick != "+ New Customer" and customer_pick in customer_lookup:
-        prefill_name, prefill_phone = customer_lookup[customer_pick]
-    else:
-        # A genuinely new customer - restore anything they'd already typed before a window
-        # refresh wiped the in-memory form state, so nobody has to start over.
-        prefill_name = load_draft_field("nc_customer_name")
-        prefill_phone = load_draft_field("nc_customer_phone")
-
-    # A generation counter baked into the widget key - bumped after every successful
-    # submission (see below) - guarantees a genuinely fresh widget afterward, rather
-    # than relying on session_state deletion alone to take effect before the widget
-    # re-renders.
+    # Returning-customer autofill needs to update the actual widget state, not only the
+    # `value=` argument. Streamlit keeps a widget's existing session value once its key has
+    # been created, so the old implementation visibly changed the dropdown but left the name
+    # and phone boxes unchanged. These stable widget keys plus an on_change callback make the
+    # selected customer's details appear immediately.
     gen = st.session_state.get("nc_customer_field_gen", 0)
     name_key, phone_key = f"nc_customer_name_input_{gen}", f"nc_customer_phone_input_{gen}"
+
+    def _apply_customer_pick():
+        picked = st.session_state.get("nc_customer_pick", "+ New Customer")
+        if picked != "+ New Customer" and picked in customer_lookup:
+            cname, cphone = customer_lookup[picked]
+            st.session_state[name_key] = cname
+            st.session_state[phone_key] = cphone
+        else:
+            st.session_state[name_key] = load_draft_field("nc_customer_name")
+            st.session_state[phone_key] = load_draft_field("nc_customer_phone")
+
+    customer_pick = st.selectbox(
+        "Customer",
+        [customer_options[0]] + sorted(customer_options[1:]),
+        key="nc_customer_pick",
+        on_change=_apply_customer_pick,
+    )
+
+    if name_key not in st.session_state or phone_key not in st.session_state:
+        if customer_pick != "+ New Customer" and customer_pick in customer_lookup:
+            prefill_name, prefill_phone = customer_lookup[customer_pick]
+        else:
+            prefill_name = load_draft_field("nc_customer_name")
+            prefill_phone = load_draft_field("nc_customer_phone")
+        st.session_state.setdefault(name_key, prefill_name)
+        st.session_state.setdefault(phone_key, prefill_phone)
+
     a,b = st.columns(2)
-    customer_name = a.text_input("Customer Name *", value=prefill_name, key=name_key,
-                                  on_change=lambda: save_draft_field("nc_customer_name", st.session_state.get(name_key, "")))
-    customer_number = b.text_input("Customer Phone *", value=prefill_phone, key=phone_key,
-                                    on_change=lambda: save_draft_field("nc_customer_phone", st.session_state.get(phone_key, "")))
+    customer_name = a.text_input(
+        "Customer Name *", key=name_key,
+        on_change=lambda: save_draft_field("nc_customer_name", st.session_state.get(name_key, "")))
+    customer_number = b.text_input(
+        "Customer Phone *", key=phone_key,
+        on_change=lambda: save_draft_field("nc_customer_phone", st.session_state.get(phone_key, "")))
 
     with st.form("new_order_form", clear_on_submit=True):
         st.markdown("### Order Type")
