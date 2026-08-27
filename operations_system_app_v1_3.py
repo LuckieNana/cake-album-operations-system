@@ -28,6 +28,7 @@ except ImportError:
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import time
+import threading
 import json
 import re
 import secrets as secrets_mod
@@ -1285,9 +1286,32 @@ else:
 # Database helpers
 # -----------------------------
 
+@st.cache_resource
+def _configure_sqlite_once():
+    """Configure SQLite once for a multi-user Streamlit server.
+
+    WAL lets readers continue while another user is writing, and NORMAL synchronous mode
+    removes avoidable disk waits while keeping SQLite's durability guarantees appropriate
+    for this ERP. This is especially important when several departments are logged in at once.
+    """
+    try:
+        with sqlite3.connect(DATABASE_FILE, timeout=15) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=15000")
+    except Exception as e:
+        print(f"[DB] SQLite performance setup skipped: {e}", flush=True)
+    return True
+
+
+_configure_sqlite_once()
+
+
 def connect():
-    conn = sqlite3.connect(DATABASE_FILE)
+    conn = sqlite3.connect(DATABASE_FILE, timeout=15)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -1946,11 +1970,21 @@ def topper_urgency(row):
     return "🟢 NORMAL TIME"
 
 def create_notification(order_id, target_department, target_person, message):
+    """Save the in-app notification immediately; send web-push in the background.
+
+    Web-push is an external network call and can take seconds per device. It must never hold
+    up Customer Care, a baker, piler, coverer or decorator while they are moving a cake.
+    """
     with connect() as conn:
         conn.execute("""INSERT INTO notifications(order_id,target_department,target_person,message,notification_status,created_at)
                         VALUES(?,?,?,?,?,?)""",(order_id,target_department,target_person,message,"Unread",now_iso()))
         conn.commit()
-    send_push_notification(target_department, "Cake Album Operations", message)
+    threading.Thread(
+        target=send_push_notification,
+        args=(target_department, "Cake Album Operations", message),
+        daemon=True,
+        name=f"push-{str(order_id)[-8:]}"
+    ).start()
 
 
 def send_push_notification(target_department, title, body):
@@ -2589,10 +2623,35 @@ def db_columns(table: str):
         return [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
 
 
+HEAVY_ORDER_MEDIA_COLUMNS = {"reference_image_base64", "reference_images_json"}
+
+
 @st.cache_data(show_spinner=False)
 def load_orders_cached(db_mtime: float):
-    with sqlite3.connect(DATABASE_FILE) as conn:
-        return pd.read_sql_query("SELECT * FROM orders", conn)
+    """Load operational fields only.
+
+    Customer photos used to be stored as base64 inside the orders table, so SELECT * caused
+    every logged-in phone to repeatedly pull every historical cake image into memory. That
+    made ordinary queue checks and form reruns progressively slower as the database grew.
+    Images are now fetched lazily only for the one order that is actually opened.
+    """
+    with sqlite3.connect(DATABASE_FILE, timeout=15) as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]
+        light_cols = [c for c in cols if c not in HEAVY_ORDER_MEDIA_COLUMNS]
+        quoted = ",".join(f'"{c}"' for c in light_cols)
+        return pd.read_sql_query(f"SELECT {quoted} FROM orders", conn)
+
+
+@st.cache_data(show_spinner=False)
+def load_order_media_cached(order_id: str, db_mtime: float):
+    with sqlite3.connect(DATABASE_FILE, timeout=15) as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]
+        wanted = [c for c in ("reference_image_base64", "reference_images_json", "reference_image_path") if c in cols]
+        if not wanted:
+            return {}
+        quoted = ",".join(f'"{c}"' for c in wanted)
+        row = conn.execute(f"SELECT {quoted} FROM orders WHERE order_id=?", (order_id,)).fetchone()
+        return dict(zip(wanted, row)) if row else {}
 
 
 def load_orders():
@@ -2600,8 +2659,14 @@ def load_orders():
     return load_orders_cached(mtime)
 
 
+def load_order_media(order_id):
+    mtime = DATABASE_FILE.stat().st_mtime if DATABASE_FILE.exists() else 0
+    return load_order_media_cached(str(order_id), mtime)
+
+
 def refresh_data():
     load_orders_cached.clear()
+    load_order_media_cached.clear()
 
 
 def audit_log(order_id: str | None, action_type: str, stage: str, details: str, performed_by: str):
@@ -2921,7 +2986,15 @@ def render_reference_images(row):
     format the app has used over time. Pulled out as its own function so both the
     normal order card and the Incoming Workload preview cards can use it."""
     images_shown = False
-    images_json = row.get("reference_images_json")
+    # Normal queue data deliberately excludes base64 image blobs for speed. Fetch media only
+    # when this specific cake is actually opened.
+    media = {}
+    try:
+        if not row.get("reference_images_json") and not row.get("reference_image_base64"):
+            media = load_order_media(row.get("order_id")) if row.get("order_id") else {}
+    except Exception:
+        media = {}
+    images_json = row.get("reference_images_json") or media.get("reference_images_json")
     if images_json:
         try:
             all_imgs = json.loads(images_json)
@@ -2935,8 +3008,8 @@ def render_reference_images(row):
         except Exception:
             pass
     if not images_shown:
-        img_b64 = row.get("reference_image_base64")
-        path = row.get("reference_image_path")
+        img_b64 = row.get("reference_image_base64") or media.get("reference_image_base64")
+        path = row.get("reference_image_path") or media.get("reference_image_path")
         if img_b64 and isinstance(img_b64, str) and img_b64.startswith("data:image"):
             st.markdown("**📷 Customer Reference Image**")
             st.image(img_b64, caption="What the customer wants — refer to this at every stage", width=420)
@@ -3232,7 +3305,11 @@ def render_customer_care():
 
     render_customer_profile_lookup(df)
     render_followup_complaints_section(df)
-    render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
+    # Rendering the complete historical image gallery on every Customer Care rerun was one
+    # of the biggest sources of slowness. Streamlit still executes collapsed expanders, so
+    # the gallery must be an explicit opt-in load.
+    if st.toggle("🖼️ Load All Orders Image Gallery", value=False, key="cc_load_gallery"):
+        render_order_gallery(df, "🖼️ All Orders — Images & Copyable Details")
 
     if st.session_state.get("is_hod"):
         with st.expander("👑 HOD: Correct a Wrongly Entered Order"):
@@ -3457,7 +3534,7 @@ def render_customer_care():
 
     st.markdown("### Customer Details")
     st.caption("Search for a returning customer to pick their name and number automatically — cuts down on typos and duplicate entries. Pick \"+ New Customer\" if they're not in here yet.")
-    past_customers = load_orders()
+    past_customers = df
     customer_options = ["+ New Customer"]
     customer_lookup = {}
     if not past_customers.empty and "customer_name" in past_customers.columns:
@@ -3718,7 +3795,10 @@ def render_customer_care():
             fresh_df = load_orders()
             new_row = fresh_df[fresh_df["order_id"] == order_id]
             if not new_row.empty:
-                sync_order_to_sheet(new_row.iloc[0])
+                # Google Sheets is a remote service; never make Customer Care wait for it.
+                row_copy = new_row.iloc[0].copy()
+                threading.Thread(target=sync_order_to_sheet, args=(row_copy,), daemon=True,
+                                 name=f"sheet-sync-{order_id[-8:]}").start()
         except Exception:
             pass  # sheet sync issues should never block order creation
         st.success(f"Order {order_id} created ({order_quantity} unit(s), total UGX {total_price:,.0f}) and sent to Finance."
@@ -4962,7 +5042,7 @@ def render_piling():
     view_mode = st.radio("View", ["📷 Simple View", "📋 Full View"], key="pile_view_mode", horizontal=True,
                          index=(0 if st.session_state.get("pile_view_mode", "📷 Simple View") == "📷 Simple View" else 1))
     if view_mode == "📷 Simple View":
-        render_simple_view("Filling / Piling", "piler_assigned", "Piler", "Piling Incoming", "Piling",
+        render_simple_view_live("Filling / Piling", "piler_assigned", "Piler", "Piling Incoming", "Piling",
                             "Covering Incoming", "Coating / Covering", "coverer_assigned", "Coverer to check piling and accept",
                             "Piling Complete → Send to Covering", "piling_started_at", "piling_completed_at",
                             "Filling / Piling", materials_required=False)
@@ -5118,7 +5198,7 @@ def render_covering():
     view_mode = st.radio("View", ["📷 Simple View", "📋 Full View"], key="cov_view_mode", horizontal=True,
                          index=(0 if st.session_state.get("cov_view_mode", "📷 Simple View") == "📷 Simple View" else 1))
     if view_mode == "📷 Simple View":
-        render_simple_view("Coating / Covering", "coverer_assigned", "Coverer", "Covering Incoming", "Covering",
+        render_simple_view_live("Coating / Covering", "coverer_assigned", "Coverer", "Covering Incoming", "Covering",
                             "Decorating Incoming", "Decoration", "decorator_assigned", "Decorator to check covering and accept",
                             "Covering Complete → Send to Decoration", "covering_started_at", "covering_completed_at",
                             "Coating / Covering", materials_required=True)
@@ -5619,6 +5699,14 @@ def render_simple_view(department_label, staff_column, role_label, incoming_stat
     with st.expander("🔍 See full details"):
         order_card(row)
 
+# Refresh only the phone queue, not the entire ERP page. A cake handed off by another
+# department becomes visible here within 10 seconds even if the worker does not tap anything.
+if hasattr(st, "fragment"):
+    render_simple_view_live = st.fragment(run_every="10s")(render_simple_view)
+else:
+    render_simple_view_live = render_simple_view
+
+
 def render_incoming_workload_forecast(df, staff_column, role_label, pre_stage_statuses, next_stage_label):
     """Shows the whole department everything still earlier in the pipeline for this role -
     whether or not a specific person has been named yet. The point is visibility as soon as
@@ -5679,7 +5767,7 @@ def render_decoration():
     view_mode = st.radio("View", ["📷 Simple View", "📋 Full View"], key="deco_view_mode", horizontal=True,
                          index=(0 if st.session_state.get("deco_view_mode", "📷 Simple View") == "📷 Simple View" else 1))
     if view_mode == "📷 Simple View":
-        render_simple_view("Decoration", "decorator_assigned", "Decorator", "Decorating Incoming", "Decorating",
+        render_simple_view_live("Decoration", "decorator_assigned", "Decorator", "Decorating Incoming", "Decorating",
                             "Studio Check", "Studio / Final QC", None, "Final quality check",
                             "Decoration Complete → Send to Studio", "decorating_started_at", "decorating_completed_at",
                             "Decoration", materials_required=True)
