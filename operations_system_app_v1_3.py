@@ -1751,7 +1751,10 @@ def ensure_release_2_schema():
             confirmed_at TEXT NOT NULL
         )""")
         topper_cols = {
-            "topper_required": "TEXT DEFAULT 'No'", "topper_wording": "TEXT", "topper_notes": "TEXT",
+            "topper_required": "TEXT DEFAULT 'No'", "topper_count": "INTEGER DEFAULT 0",
+            "topper_wording": "TEXT", "topper_notes": "TEXT",
+            "topper_1_wording": "TEXT", "topper_1_notes": "TEXT",
+            "topper_2_wording": "TEXT", "topper_2_notes": "TEXT",
             "topper_status": "TEXT DEFAULT 'Not Required'", "topper_assigned_to": "TEXT",
             "topper_target_at": "TEXT", "topper_ready_at": "TEXT",
             "topper_received_by_decorator": "TEXT", "topper_received_at": "TEXT", "topper_pickup_note": "TEXT",
@@ -3679,24 +3682,39 @@ def render_customer_care():
 
         if product_type == "Cake":
             st.markdown("### Topper Requirements")
-            a,b = st.columns(2)
-            topper_required = a.selectbox("Topper Needed?", ["No","Yes"])
-            topper_wording = b.text_input("Words on Topper (leave blank if no topper)")
-            topper_notes = st.text_area("Topper Style / Design Notes (leave blank if no topper)")
+            topper_required = st.selectbox("Topper Needed?", ["No","Yes"], key="nc_topper_required")
+            topper_count = 0
+            topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = ""
+            if topper_required == "Yes":
+                topper_count = st.selectbox("How many toppers does this cake need?", [1, 2], key="nc_topper_count")
+                st.markdown("**Topper 1**")
+                topper_1_wording = st.text_input("Words on Topper 1", key="nc_topper_1_wording")
+                topper_1_notes = st.text_area("Topper 1 Style / Design Notes", key="nc_topper_1_notes")
+                if int(topper_count) == 2:
+                    st.markdown("**Topper 2**")
+                    topper_2_wording = st.text_input("Words on Topper 2", key="nc_topper_2_wording")
+                    topper_2_notes = st.text_area("Topper 2 Style / Design Notes", key="nc_topper_2_notes")
+            # Keep the original combined fields populated so every existing topper queue,
+            # notification and report remains backward-compatible.
+            topper_wording_parts = []
+            topper_notes_parts = []
+            if topper_required == "Yes":
+                if topper_1_wording.strip(): topper_wording_parts.append(f"Topper 1: {topper_1_wording.strip()}")
+                if topper_1_notes.strip(): topper_notes_parts.append(f"Topper 1: {topper_1_notes.strip()}")
+                if int(topper_count or 0) == 2:
+                    if topper_2_wording.strip(): topper_wording_parts.append(f"Topper 2: {topper_2_wording.strip()}")
+                    if topper_2_notes.strip(): topper_notes_parts.append(f"Topper 2: {topper_2_notes.strip()}")
+            topper_wording = " | ".join(topper_wording_parts)
+            topper_notes = " | ".join(topper_notes_parts)
+
             st.markdown("### Sticker Requirements")
-            sticker_required = st.selectbox("Does the cake need a sticker?", ["No","Yes"])
+            sticker_required = st.selectbox("Does the cake need a sticker?", ["No","Yes"], key="nc_sticker_required")
+            sticker_notes = st.text_area("Sticker Design Notes (leave blank if no sticker)", key="nc_sticker_notes") if sticker_required == "Yes" else ""
+            # Stickers can be several; do not force a 1-or-2 count. Keep legacy count fields neutral.
             sticker_count, sticker_1_notes, sticker_2_notes = 0, "", ""
-            if sticker_required == "Yes":
-                sticker_count = st.selectbox("How many stickers does this cake need?", [1, 2], key="nc_sticker_count")
-                sticker_1_notes = st.text_area("Sticker 1 — words / design notes", key="nc_sticker_1_notes")
-                if int(sticker_count) == 2:
-                    sticker_2_notes = st.text_area("Sticker 2 — words / design notes", key="nc_sticker_2_notes")
-            sticker_notes = (
-                (f"Sticker 1: {sticker_1_notes.strip()}" if sticker_1_notes.strip() else "Sticker 1") +
-                ((f"\nSticker 2: {sticker_2_notes.strip()}" if sticker_2_notes.strip() else "\nSticker 2") if int(sticker_count or 0) == 2 else "")
-            ) if sticker_required == "Yes" else ""
         else:
-            topper_required, topper_wording, topper_notes = "No", "", ""
+            topper_required, topper_count = "No", 0
+            topper_wording = topper_notes = topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = ""
             sticker_required, sticker_count, sticker_1_notes, sticker_2_notes, sticker_notes = "No", 0, "", "", ""
 
         st.markdown("### Delivery Window")
@@ -3868,15 +3886,19 @@ def render_customer_care():
             "side_cake_count": int(side_cake_count), "side_cake_details_json": json.dumps(side_cake_details) if side_cake_details else "",
             "order_type": order_type, "inventory_check_required": inventory_check,
             "delivery_window_start": str(delivery_window_start), "delivery_window_end": str(delivery_window_end),
-            "topper_required": topper_required, "topper_wording": topper_wording.strip() if topper_required=="Yes" else "",
+            "topper_required": topper_required, "topper_count": int(topper_count or 0),
+            "topper_wording": topper_wording.strip() if topper_required=="Yes" else "",
             "topper_notes": topper_notes.strip() if topper_required=="Yes" else "",
+            "topper_1_wording": topper_1_wording.strip() if topper_required=="Yes" else "",
+            "topper_1_notes": topper_1_notes.strip() if topper_required=="Yes" else "",
+            "topper_2_wording": topper_2_wording.strip() if (topper_required=="Yes" and int(topper_count or 0) == 2) else "",
+            "topper_2_notes": topper_2_notes.strip() if (topper_required=="Yes" and int(topper_count or 0) == 2) else "",
             "topper_status": ("Assigned" if (topper_required=="Yes" and not is_short_pipeline) else
                                ("Pending Assignment" if topper_required=="Yes" else "Not Required")),
             "topper_assigned_to": topper_owner_nc if (topper_required=="Yes" and not is_short_pipeline) else "",
-            "sticker_required": sticker_required, "sticker_count": int(sticker_count or 0),
+            "sticker_required": sticker_required, "sticker_count": 0,
             "sticker_notes": sticker_notes.strip() if sticker_required=="Yes" else "",
-            "sticker_1_notes": sticker_1_notes.strip() if sticker_required=="Yes" else "",
-            "sticker_2_notes": sticker_2_notes.strip() if (sticker_required=="Yes" and int(sticker_count or 0) == 2) else "",
+            "sticker_1_notes": "", "sticker_2_notes": "",
             "sticker_status": ("Assigned" if (sticker_required=="Yes" and not is_short_pipeline) else
                                 ("Pending Assignment" if sticker_required=="Yes" else "Not Required")),
             "sticker_assigned_to": sticker_owner_nc if (sticker_required=="Yes" and not is_short_pipeline) else "",
@@ -3963,10 +3985,8 @@ def notify_topper_sticker_if_approved(row, by):
     if str(row.get("sticker_required")) == "Yes":
         owner = disp(row.get("sticker_assigned_to"))
         if owner != "—":
-            sticker_count = int(row.get("sticker_count") or 1)
             create_notification(row.order_id, "Design & Innovation", owner,
-                                 f"🏷️ {row.order_id} ({disp(row.get('customer_name'))}) is confirmed — "
-                                 f"{sticker_count} sticker{'s' if sticker_count != 1 else ''} needed. "
+                                 f"🏷️ {row.order_id} ({disp(row.get('customer_name'))}) is confirmed — sticker work needed. "
                                  f"Notes: {disp(row.get('sticker_notes'))}.")
 
 
@@ -5624,13 +5644,19 @@ def render_design_innovation():
         c.metric("Due Soon",int((q["topper_urgency"]=="🟡 DUE SOON").sum()))
         d.metric("Normal Time",int((q["topper_urgency"]=="🟢 NORMAL TIME").sum()))
         st.markdown("### Topper Priority Queue")
-        st.dataframe(q[["topper_urgency","order_id","customer_name","topper_wording","decorator_assigned","due_date","expected_time","topper_target_display","topper_status","topper_assigned_to"]],hide_index=True,width='stretch')
+        topper_cols = [c for c in ["topper_urgency","order_id","customer_name","topper_count","topper_1_wording","topper_2_wording","decorator_assigned","due_date","expected_time","topper_target_display","topper_status","topper_assigned_to"] if c in q.columns]
+        st.dataframe(q[topper_cols],hide_index=True,width='stretch')
         active=q[~q["topper_status"].isin(["Ready","Received by Decorator"])]
         row=select_order(active,"topper_task") if not active.empty else None
         if row is None:
             st.success("All topper tasks are completed.")
         else:
-            order_card(row,[("Topper Words",row.get("topper_wording")),("Topper Notes",row.get("topper_notes")),("Decorator",row.get("decorator_assigned")),("Urgency",topper_urgency(row)),("Status",row.get("topper_status"))])
+            order_card(row,[("Number of Toppers",row.get("topper_count") or 1),
+                            ("Topper 1 Words",row.get("topper_1_wording") or row.get("topper_wording")),
+                            ("Topper 1 Notes",row.get("topper_1_notes") or row.get("topper_notes")),
+                            ("Topper 2 Words",row.get("topper_2_wording")),
+                            ("Topper 2 Notes",row.get("topper_2_notes")),
+                            ("Decorator",row.get("decorator_assigned")),("Urgency",topper_urgency(row)),("Status",row.get("topper_status"))])
             render_stage_material_planning("Design & Innovation", row, row.get("topper_assigned_to"), key_prefix="topper")
             by=st.text_input("Updated by",value=disp(row.get("topper_assigned_to")) if disp(row.get("topper_assigned_to"))!="—" else "Keith")
             a,b=st.columns(2)
@@ -5650,15 +5676,13 @@ def render_design_innovation():
     else:
         st.markdown("### 🏷️ Sticker Priority Queue")
         sq_active = sq[~sq["sticker_status"].isin(["Ready", "Received by Decorator"])]
-        sticker_cols = [c for c in ["order_id","customer_name","sticker_count","sticker_1_notes","sticker_2_notes","decorator_assigned","due_date","expected_time","sticker_status","sticker_assigned_to"] if c in sq.columns]
+        sticker_cols = [c for c in ["order_id","customer_name","sticker_notes","decorator_assigned","due_date","expected_time","sticker_status","sticker_assigned_to"] if c in sq.columns]
         st.dataframe(sq[sticker_cols], hide_index=True, width='stretch')
         srow = select_order(sq_active, "sticker_task") if not sq_active.empty else None
         if srow is None:
             st.success("All sticker tasks are completed.")
         else:
-            order_card(srow, [("Sticker Count", srow.get("sticker_count") or 1),
-                              ("Sticker 1", srow.get("sticker_1_notes") or srow.get("sticker_notes")),
-                              ("Sticker 2", srow.get("sticker_2_notes")),
+            order_card(srow, [("Sticker Notes", srow.get("sticker_notes")),
                               ("Decorator", srow.get("decorator_assigned")), ("Status", srow.get("sticker_status"))])
             render_stage_material_planning("Design & Innovation", srow, srow.get("sticker_assigned_to"), key_prefix="sticker")
             sby = st.text_input("Updated by", value=disp(srow.get("sticker_assigned_to")) if disp(srow.get("sticker_assigned_to")) != "—" else "Doreen", key="sticker_updated_by")
@@ -5667,8 +5691,7 @@ def render_design_innovation():
                 update_order(srow.order_id, {"sticker_status":"In Progress"}, sby, "Sticker Started", "Design & Innovation"); st.rerun()
             if sb.button("✅ Sticker Ready", width='stretch'):
                 sdecorator = disp(srow.get("decorator_assigned"))
-                _scount = int(srow.get("sticker_count") or 1)
-                smessage = f"🏷️ {_scount} sticker{'s are' if _scount != 1 else ' is'} ready for order {srow.order_id} ({disp(srow.get('customer_name'))}) — pick up from {sby}."
+                smessage = f"🏷️ Sticker work is ready for order {srow.order_id} ({disp(srow.get('customer_name'))}) — pick up from {sby}."
                 update_order(srow.order_id, {"sticker_status":"Ready", "sticker_ready_at":now_iso(), "sticker_pickup_note":smessage}, sby, "Sticker Ready", "Design & Innovation")
                 create_notification(srow.order_id, "Decoration", sdecorator, smessage)
                 st.success(f"Sticker ready. {sdecorator} notified."); st.rerun()
@@ -5770,9 +5793,15 @@ def render_order_gallery(df, title="🖼️ All Active Orders"):
     st.caption(f"{len(active_sorted)} active order(s). Click any one to see its reference image and copy its details.")
     for _, cake_row in active_sorted.iterrows():
         urgent_tag = "🚨 URGENT — " if str(cake_row.get("urgency_level")) == "Urgent" else ""
+        # Keep the gallery scan-friendly: show only the FINAL decorator selected for the cake.
+        # decorator_assigned may contain multiple names (Customer Care uses a multiselect),
+        # so the last name in that assignment list is treated as the final decorator.
+        decorator_raw = cake_row.get("decorator_assigned")
+        decorator_people = [p.strip() for p in str(decorator_raw or "").replace(";", ",").split(",") if p.strip()]
+        final_decorator = first_name(decorator_people[-1]) if decorator_people else "—"
         label = (f"{urgent_tag}{cake_row.get('order_id')} — {disp(cake_row.get('customer_name'))} — "
                  f"{disp(cake_row.get('flavours'))} — Due {disp(cake_row.get('due_date'))} {disp(cake_row.get('expected_time'))} — "
-                 f"{disp(cake_row.get('workflow_status'))}")
+                 f"Decorator: {final_decorator} — {disp(cake_row.get('workflow_status'))}")
         with st.expander(label):
             has_image = render_reference_images(cake_row)
             if not has_image:
