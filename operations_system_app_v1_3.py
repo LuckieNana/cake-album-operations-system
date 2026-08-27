@@ -5365,21 +5365,26 @@ def render_order_gallery(df, title="🖼️ All Active Orders"):
             can_see_price = st.session_state.get("department") in (
                 "Customer Care", "Packaging", "Finance", "Procurement", "Owner / Admin"
             )
-            price_line = f"Price: {fmt_ugx(cake_row.get('price_ugx'))}  Balance: {fmt_ugx(cake_row.get('balance'))}\n" if can_see_price else ""
-            details_text = (
-                f"Order: {cake_row.get('order_id')}\n"
-                f"Customer: {disp(cake_row.get('customer_name'))}  Phone: {disp(cake_row.get('customer_number'))}\n"
-                f"Product: {disp(cake_row.get('product_type'))}\n"
-                f"Category: {disp(cake_row.get('cake_category'))}\n"
-                f"Flavours: {disp(cake_row.get('flavours'))}\n"
-                f"Size: {disp(cake_row.get('cake_size_value'))}\"  Shape: {disp(cake_row.get('cake_shape'))}\n"
-                f"Icing/Finish: {disp(cake_row.get('icing_type'))}\n"
-                f"Design Notes: {disp(cake_row.get('design_description'))}\n"
-                f"{price_line}"
-                f"Due: {disp(cake_row.get('due_date'))} at {disp(cake_row.get('expected_time'))}\n"
-                f"Currently at: {disp(cake_row.get('workflow_status'))}\n"
-                f"Urgency: {disp(cake_row.get('urgency_level'))}"
-            )
+            bold_fields = [
+                ("Order", cake_row.get('order_id')),
+                ("Customer", f"{disp(cake_row.get('customer_name'))}  Phone: {disp(cake_row.get('customer_number'))}"),
+                ("Product", disp(cake_row.get('product_type'))),
+                ("Category", disp(cake_row.get('cake_category'))),
+                ("Flavours", disp(cake_row.get('flavours'))),
+                ("Size", f"{disp(cake_row.get('cake_size_value'))}\"  Shape: {disp(cake_row.get('cake_shape'))}"),
+                ("Icing/Finish", disp(cake_row.get('icing_type'))),
+                ("Design Notes", disp(cake_row.get('design_description'))),
+            ]
+            if can_see_price:
+                bold_fields.append(("Price", f"{fmt_ugx(cake_row.get('price_ugx'))}  Balance: {fmt_ugx(cake_row.get('balance'))}"))
+            bold_fields += [
+                ("Due", f"{disp(cake_row.get('due_date'))} at {disp(cake_row.get('expected_time'))}"),
+                ("Currently at", disp(cake_row.get('workflow_status'))),
+                ("Urgency", disp(cake_row.get('urgency_level'))),
+            ]
+            for label_txt, value_txt in bold_fields:
+                st.markdown(f"**{label_txt}:** {value_txt}")
+            details_text = "\n".join(f"{label_txt}: {value_txt}" for label_txt, value_txt in bold_fields)
             st.caption("Tap the copy icon in the corner below to grab these details for your own notes.")
             st.code(details_text, language=None)
 
@@ -5532,20 +5537,24 @@ def render_incoming_workload_forecast(df, staff_column, role_label, pre_stage_st
                 if not has_image:
                     st.caption("No reference image was uploaded for this order.")
                 assigned_person = disp(cake_row.get(staff_column))
-                details_text = (
-                    f"Order: {cake_row.get('order_id')}\n"
-                    f"Customer: {disp(cake_row.get('customer_name'))}\n"
-                    f"Product: {disp(cake_row.get('product_type'))}\n"
-                    f"Category: {disp(cake_row.get('cake_category'))}\n"
-                    f"Flavours: {disp(cake_row.get('flavours'))}\n"
-                    f"Size: {disp(cake_row.get('cake_size_value'))}\"  Shape: {disp(cake_row.get('cake_shape'))}\n"
-                    f"Icing/Finish: {disp(cake_row.get('icing_type'))}\n"
-                    f"Design Notes: {disp(cake_row.get('design_description'))}\n"
-                    f"Due: {disp(cake_row.get('due_date'))} at {disp(cake_row.get('expected_time'))}\n"
-                    f"Currently at: {disp(cake_row.get('workflow_status'))}\n"
-                    f"{role_label}: {assigned_person if assigned_person != '—' else 'Not yet named'}\n"
-                    f"Urgency: {disp(cake_row.get('urgency_level'))}"
-                )
+                bold_fields = [
+                    ("Order", cake_row.get('order_id')),
+                    ("Customer", disp(cake_row.get('customer_name'))),
+                    ("Product", disp(cake_row.get('product_type'))),
+                    ("Category", disp(cake_row.get('cake_category'))),
+                    ("Flavours", disp(cake_row.get('flavours'))),
+                    ("Size", f"{disp(cake_row.get('cake_size_value'))}\""),
+                    ("Shape", disp(cake_row.get('cake_shape'))),
+                    ("Icing/Finish", disp(cake_row.get('icing_type'))),
+                    ("Design Notes", disp(cake_row.get('design_description'))),
+                    ("Due", f"{disp(cake_row.get('due_date'))} at {disp(cake_row.get('expected_time'))}"),
+                    ("Currently at", disp(cake_row.get('workflow_status'))),
+                    (role_label, assigned_person if assigned_person != '—' else 'Not yet named'),
+                    ("Urgency", disp(cake_row.get('urgency_level'))),
+                ]
+                for label_txt, value_txt in bold_fields:
+                    st.markdown(f"**{label_txt}:** {value_txt}")
+                details_text = "\n".join(f"{label_txt}: {value_txt}" for label_txt, value_txt in bold_fields)
                 st.caption("Tap the copy icon in the corner below to grab these details for your own notes.")
                 st.code(details_text, language=None)
 
