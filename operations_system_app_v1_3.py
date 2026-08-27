@@ -1719,6 +1719,8 @@ def ensure_release_2_schema():
             "sticker_ready_at": "TEXT",
             "sticker_received_by_decorator": "TEXT", "sticker_received_at": "TEXT", "sticker_pickup_note": "TEXT",
             "skip_baking": "TEXT DEFAULT 'No'",
+            "piling_started_at": "TEXT", "piling_completed_at": "TEXT",
+            "covering_started_at": "TEXT", "covering_completed_at": "TEXT",
         }
         order_cols_24 = {r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()}
         for name, definition in topper_cols.items():
@@ -4927,6 +4929,14 @@ def render_piling():
     page_header("🎂 Filling / Piling", "Accept baked cakes, pile to correct height, and send to Covering.")
     df = load_orders()
     render_hod_overview("Filling / Piling", df)
+    view_mode = st.radio("View", ["📷 Simple View", "📋 Full View"], key="pile_view_mode", horizontal=True,
+                         index=(0 if st.session_state.get("pile_view_mode", "📷 Simple View") == "📷 Simple View" else 1))
+    if view_mode == "📷 Simple View":
+        render_simple_view("Filling / Piling", "piler_assigned", "Piler", "Piling Incoming", "Piling",
+                            "Covering Incoming", "Coating / Covering", "coverer_assigned", "Coverer to check piling and accept",
+                            "Piling Complete → Send to Covering", "piling_started_at", "piling_completed_at",
+                            "Filling / Piling", materials_required=False)
+        return
     t0,t1,t2,t3,t4,t5,t6,t7 = st.tabs(["📅 Incoming Workload", "Incoming from Baking", "In Progress", "Correction Required",
                                   "End-of-Day Layer Reconciliation", "📋 End-of-Day Accountability", "✅ Finished Work", "🖼️ All Orders"])
     with t0:
@@ -5075,6 +5085,14 @@ def render_covering():
     page_header("🧁 Coating / Covering", "Check piling/height, cover cake, then send to Decoration.")
     df = load_orders()
     render_hod_overview("Coating / Covering", df)
+    view_mode = st.radio("View", ["📷 Simple View", "📋 Full View"], key="cov_view_mode", horizontal=True,
+                         index=(0 if st.session_state.get("cov_view_mode", "📷 Simple View") == "📷 Simple View" else 1))
+    if view_mode == "📷 Simple View":
+        render_simple_view("Coating / Covering", "coverer_assigned", "Coverer", "Covering Incoming", "Covering",
+                            "Decorating Incoming", "Decoration", "decorator_assigned", "Decorator to check covering and accept",
+                            "Covering Complete → Send to Decoration", "covering_started_at", "covering_completed_at",
+                            "Coating / Covering", materials_required=True)
+        return
     t0,t1,t2,t3,t4,t5 = st.tabs(["📅 Incoming Workload", "Incoming from Piling", "In Progress", "Correction Required", "✅ Finished Work", "🖼️ All Orders"])
     with t0:
         pre_covering_statuses = ["Production Planned", "Baking", "Baking Correction Required",
@@ -5366,6 +5384,121 @@ def render_order_gallery(df, title="🖼️ All Active Orders"):
             st.code(details_text, language=None)
 
 
+def render_simple_view(department_label, staff_column, role_label, incoming_status, active_status,
+                        next_status, next_owner, next_staff_column, next_action_text, completion_label,
+                        started_field, completed_field, materials_stage, materials_required=True):
+    """One cake at a time, photo first, plain words - matching the WhatsApp format the team
+    already knows and trusts, rather than a table you have to search through. Accountability
+    (who, when) and time tracking happen automatically the moment someone taps a button -
+    no extra typing. Materials/inventory get a simple tap-to-pick list instead of a form with
+    quantities and units; the detailed version stays one tap away for anyone who wants it."""
+    my_name = st.session_state.get("staff_name", "").strip()
+    is_hod = st.session_state.get("is_hod")
+    df = load_orders()
+    mine = df[df["workflow_status"].isin([incoming_status, active_status])] if not df.empty else df.iloc[0:0]
+    if not is_hod and not mine.empty and staff_column in mine.columns:
+        mine = mine[mine[staff_column].fillna("").str.contains(my_name, case=False, na=False) | (mine[staff_column].fillna("") == "")]
+    if mine.empty:
+        st.success("🎉 Nothing waiting for you right now — you're all caught up!")
+        return
+
+    def _urgency_key(r):
+        is_urgent = 0 if str(r.get("urgency_level")) == "Urgent" else 1
+        return (is_urgent, str(r.get("due_date") or "9999"), str(r.get("expected_time") or "99:99"))
+    mine = mine.copy()
+    mine["_sort_key"] = mine.apply(_urgency_key, axis=1)
+    mine = mine.sort_values("_sort_key")
+
+    nav_key = f"simple_view_idx_{department_label}"
+    idx = st.session_state.get(nav_key, 0)
+    idx = min(idx, len(mine) - 1)
+    row = mine.iloc[idx]
+
+    st.caption(f"Cake {idx + 1} of {len(mine)} waiting for you, most urgent first.")
+    has_image = render_reference_images(row)
+    if not has_image:
+        st.info("No photo was attached to this order.")
+
+    urgent_tag = "🚨 URGENT — " if str(row.get("urgency_level")) == "Urgent" else ""
+    st.markdown(f"### {urgent_tag}Order: {row.get('order_id')}")
+    due_display = disp(row.get("due_date"))
+    time_display = disp(row.get("expected_time"))
+    st.markdown(f"**Due:** {due_display}" + (f" at {time_display}" if time_display != "—" else ""))
+    st.markdown(f"**{role_label}:** {disp(row.get(staff_column))}")
+    st.markdown(f"**Flavours:** {disp(row.get('flavours'))} — {disp(row.get('cake_size_value'))}\" {disp(row.get('cake_shape'))}")
+    st.markdown(f"**Icing:** {disp(row.get('icing_type'))}")
+
+    design_notes = disp(row.get("design_description"))
+    if design_notes != "—":
+        st.markdown("**What to do:**")
+        steps = [s.strip() for s in re.split(r"[\n*]", design_notes) if s.strip()]
+        if len(steps) > 1:
+            for i, step in enumerate(steps, 1):
+                st.markdown(f"{i}. {step}")
+        else:
+            st.markdown(design_notes)
+
+    if str(row.get("topper_required")) == "Yes":
+        st.markdown(f"**Words on cake:** {disp(row.get('topper_wording'))}")
+    st.markdown(f"**Client:** {disp(row.get('customer_name'))}")
+
+    may_act = is_hod or not my_name or str(row.get(staff_column) or "").lower().find(my_name.lower()) != -1 or str(row.get(staff_column) or "").strip() == ""
+    is_incoming = row.get("workflow_status") == incoming_status
+
+    with st.expander("📦 What did you use?"):
+        options = STAGE_MATERIALS.get(materials_stage, ["Other"])
+        used = st.multiselect("Tap everything you used on this cake", options, key=f"simple_materials_{row.order_id}")
+        if st.button("Save", key=f"simple_materials_save_{row.order_id}", width='stretch'):
+            if used:
+                with connect() as conn:
+                    for item in used:
+                        conn.execute("""INSERT INTO stage_material_usage(order_id,stage,item_name,colour,size,quantity,unit,
+                                        material_action,recorded_by,recorded_at,base_quantity,multiplier)
+                                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                     (row.order_id, materials_stage, item, "", "", 1.0, "used", "Used",
+                                      my_name or role_label, now_iso(), 1.0, 1.0))
+                    conn.commit()
+                st.success("Saved.")
+                st.rerun()
+            else:
+                st.error("Tap at least one item first.")
+    usage = load_table("stage_material_usage")
+    materials_logged = not usage[(usage["order_id"] == row.order_id) & (usage["stage"] == materials_stage)].empty if not usage.empty else False
+
+    if is_incoming:
+        if st.button(f"▶️ Start — {row.order_id}", width='stretch', disabled=not may_act, key=f"simple_start_{row.order_id}"):
+            update_order(row.order_id, {"workflow_status": active_status, "current_owner": department_label,
+                                         started_field: now_iso()}, my_name or role_label, f"{department_label} Started (Simple View)", department_label)
+            st.rerun()
+    else:
+        can_finish = may_act and (materials_logged or not materials_required)
+        if not materials_logged and materials_required:
+            st.warning("Log what you used above before marking this done.")
+        if st.button(f"✅ {completion_label}", width='stretch', disabled=not can_finish, key=f"simple_done_{row.order_id}"):
+            update_fields = {"workflow_status": next_status, "current_owner": next_owner,
+                              "next_action": next_action_text, completed_field: now_iso()}
+            update_order(row.order_id, update_fields, my_name or role_label, f"{department_label} Complete (Simple View)", department_label)
+            if next_staff_column:
+                create_notification(row.order_id, next_owner, row.get(next_staff_column),
+                                     f"🎂 {row.order_id} ({disp(row.get('customer_name'))}) is ready for you.")
+            st.session_state[nav_key] = 0
+            st.rerun()
+
+    if not may_act:
+        st.caption(f"👀 Viewing only — this is assigned to {disp(row.get(staff_column))}.")
+
+    nav_a, nav_b = st.columns(2)
+    if len(mine) > 1:
+        if nav_a.button("⬅️ Previous", disabled=(idx == 0), key=f"simple_prev_{department_label}"):
+            st.session_state[nav_key] = idx - 1
+            st.rerun()
+        if nav_b.button("Next ➡️", disabled=(idx >= len(mine) - 1), key=f"simple_next_{department_label}"):
+            st.session_state[nav_key] = idx + 1
+            st.rerun()
+    with st.expander("🔍 See full details"):
+        order_card(row)
+
+
 def render_incoming_workload_forecast(df, staff_column, role_label, pre_stage_statuses, next_stage_label):
     """Shows the whole department everything still earlier in the pipeline for this role -
     whether or not a specific person has been named yet. The point is visibility as soon as
@@ -5421,6 +5554,14 @@ def render_decoration():
     page_header("🎨 Decoration", "Accept covering, receive topper handoffs, decorate, and send to Studio.")
     df = load_orders()
     render_hod_overview("Decoration", df)
+    view_mode = st.radio("View", ["📷 Simple View", "📋 Full View"], key="deco_view_mode", horizontal=True,
+                         index=(0 if st.session_state.get("deco_view_mode", "📷 Simple View") == "📷 Simple View" else 1))
+    if view_mode == "📷 Simple View":
+        render_simple_view("Decoration", "decorator_assigned", "Decorator", "Decorating Incoming", "Decorating",
+                            "Studio Check", "Studio / Final QC", None, "Final quality check",
+                            "Decoration Complete → Send to Studio", "decorating_started_at", "decorating_completed_at",
+                            "Decoration", materials_required=True)
+        return
     t0,t1,t3,t4,t5,t6 = st.tabs(["📅 Incoming Workload", "Incoming from Covering", "Decorating", "Correction Required", "✅ Finished Work", "🖼️ All Orders"])
     with t0:
         pre_decoration_statuses = ["Production Planned", "Baking", "Baking Correction Required",
