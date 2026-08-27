@@ -1755,7 +1755,8 @@ def ensure_release_2_schema():
             "topper_status": "TEXT DEFAULT 'Not Required'", "topper_assigned_to": "TEXT",
             "topper_target_at": "TEXT", "topper_ready_at": "TEXT",
             "topper_received_by_decorator": "TEXT", "topper_received_at": "TEXT", "topper_pickup_note": "TEXT",
-            "sticker_required": "TEXT DEFAULT 'No'", "sticker_notes": "TEXT",
+            "sticker_required": "TEXT DEFAULT 'No'", "sticker_count": "INTEGER DEFAULT 0",
+            "sticker_notes": "TEXT", "sticker_1_notes": "TEXT", "sticker_2_notes": "TEXT",
             "sticker_status": "TEXT DEFAULT 'Not Required'", "sticker_assigned_to": "TEXT",
             "sticker_ready_at": "TEXT",
             "sticker_received_by_decorator": "TEXT", "sticker_received_at": "TEXT", "sticker_pickup_note": "TEXT",
@@ -3684,10 +3685,19 @@ def render_customer_care():
             topper_notes = st.text_area("Topper Style / Design Notes (leave blank if no topper)")
             st.markdown("### Sticker Requirements")
             sticker_required = st.selectbox("Does the cake need a sticker?", ["No","Yes"])
-            sticker_notes = st.text_area("Sticker Design Notes (leave blank if no sticker)") if sticker_required == "Yes" else ""
+            sticker_count, sticker_1_notes, sticker_2_notes = 0, "", ""
+            if sticker_required == "Yes":
+                sticker_count = st.selectbox("How many stickers does this cake need?", [1, 2], key="nc_sticker_count")
+                sticker_1_notes = st.text_area("Sticker 1 — words / design notes", key="nc_sticker_1_notes")
+                if int(sticker_count) == 2:
+                    sticker_2_notes = st.text_area("Sticker 2 — words / design notes", key="nc_sticker_2_notes")
+            sticker_notes = (
+                (f"Sticker 1: {sticker_1_notes.strip()}" if sticker_1_notes.strip() else "Sticker 1") +
+                ((f"\nSticker 2: {sticker_2_notes.strip()}" if sticker_2_notes.strip() else "\nSticker 2") if int(sticker_count or 0) == 2 else "")
+            ) if sticker_required == "Yes" else ""
         else:
             topper_required, topper_wording, topper_notes = "No", "", ""
-            sticker_required, sticker_notes = "No", ""
+            sticker_required, sticker_count, sticker_1_notes, sticker_2_notes, sticker_notes = "No", 0, "", "", ""
 
         st.markdown("### Delivery Window")
         st.caption("The time range the customer expects delivery within — used by Dispatch/Driver.")
@@ -3740,14 +3750,33 @@ def render_customer_care():
                                          ["Needs baking", "Already in inventory — skip baking"], key="nc_needs_baking_full")
 
         bakers_nc, pilers_nc, coverers_nc, decorators_nc, _ = staff_lists()
+        baker_counts = staff_workload_counts("baker_assigned")
+        mixer_counts = staff_workload_counts("mixer_assigned")
+        oven_counts = staff_workload_counts("oven_person_assigned")
         piler_counts = staff_workload_counts("piler_assigned")
         coverer_counts = staff_workload_counts("coverer_assigned")
         decorator_counts = staff_workload_counts("decorator_assigned")
 
+        # Customer Care now plans the baking crew at order entry. The old routine
+        # Customer Care -> Finance -> Production Planning -> Baking hop made every order
+        # wait for another person to touch it. We keep Finance as the payment gate, but
+        # once Finance approves, the already-assigned crew receives the cake immediately.
+        baker_nc, mixer_nc, oven_nc = "", [], []
+        if needs_baking == "Needs baking":
+            st.markdown("#### 🔥 Baking Team — assign now")
+            st.caption("Assign the people who will bake this order now. Finance only confirms payment; it will then go straight to Baking without waiting for Production Planning.")
+            baker_nc = st.selectbox("Baker (In Charge) *", [""] + bakers_nc,
+                                    format_func=lambda n: "Select baker" if not n else format_name_with_workload(n, baker_counts),
+                                    key="nc_baker")
+            mixer_nc = st.multiselect("Mixer(s) *", bakers_nc,
+                                      format_func=lambda n: format_name_with_workload(n, mixer_counts), key="nc_mixers")
+            oven_nc = st.multiselect("Oven In Charge *", bakers_nc,
+                                     format_func=lambda n: format_name_with_workload(n, oven_counts), key="nc_oven_people")
+
         piler_nc, coverer_nc, decorator_nc = [], [], []
         topper_owner_nc, sticker_owner_nc = "Keith", "Doreen"
         if not is_short_pipeline:
-            st.caption("Pick who's doing the piling, covering, and decoration for this cake now, so it's already lined up once it's through Baking. Workload shown next to each name is their current active job count.")
+            st.caption("Pick who's doing the piling, covering, and decoration for this cake now, so the whole production chain is already lined up at Customer Care. Workload shown next to each name is their current active job count.")
             piler_nc = st.multiselect("Piler(s)", pilers_nc, format_func=lambda n: format_name_with_workload(n, piler_counts), key="nc_piler_multi")
             coverer_nc = st.multiselect("Coverer(s)", coverers_nc, format_func=lambda n: format_name_with_workload(n, coverer_counts), key="nc_coverer_multi")
             decorator_nc = st.multiselect("Decorator(s)", decorators_nc, format_func=lambda n: format_name_with_workload(n, decorator_counts), key="nc_decorator_multi")
@@ -3762,6 +3791,10 @@ def render_customer_care():
         missing = [name for name,val in [("Customer Name",customer_name),("Customer Phone",customer_number),
                    ("Flavours",flavours),("Design",design),("Entered By",created_by)] if not str(val).strip()]
         if price <= 0: missing.append("Price")
+        if needs_baking == "Needs baking":
+            if not str(baker_nc).strip(): missing.append("Baker (In Charge)")
+            if not mixer_nc: missing.append("Mixer")
+            if not oven_nc: missing.append("Oven In Charge")
         if is_multi_tier == "Yes":
             incomplete_tiers = [str(t.get("tier")) for t in tier_details if len(t.get("flavours", [])) < 2]
             if incomplete_tiers:
@@ -3840,10 +3873,16 @@ def render_customer_care():
             "topper_status": ("Assigned" if (topper_required=="Yes" and not is_short_pipeline) else
                                ("Pending Assignment" if topper_required=="Yes" else "Not Required")),
             "topper_assigned_to": topper_owner_nc if (topper_required=="Yes" and not is_short_pipeline) else "",
-            "sticker_required": sticker_required, "sticker_notes": sticker_notes.strip() if sticker_required=="Yes" else "",
+            "sticker_required": sticker_required, "sticker_count": int(sticker_count or 0),
+            "sticker_notes": sticker_notes.strip() if sticker_required=="Yes" else "",
+            "sticker_1_notes": sticker_1_notes.strip() if sticker_required=="Yes" else "",
+            "sticker_2_notes": sticker_2_notes.strip() if (sticker_required=="Yes" and int(sticker_count or 0) == 2) else "",
             "sticker_status": ("Assigned" if (sticker_required=="Yes" and not is_short_pipeline) else
                                 ("Pending Assignment" if sticker_required=="Yes" else "Not Required")),
             "sticker_assigned_to": sticker_owner_nc if (sticker_required=="Yes" and not is_short_pipeline) else "",
+            "baker_assigned": baker_nc if needs_baking == "Needs baking" else "",
+            "mixer_assigned": ", ".join(mixer_nc) if (needs_baking == "Needs baking" and mixer_nc) else "",
+            "oven_person_assigned": ", ".join(oven_nc) if (needs_baking == "Needs baking" and oven_nc) else "",
             "piler_assigned": ", ".join(piler_nc) if piler_nc else "",
             "coverer_assigned": ", ".join(coverer_nc) if coverer_nc else "",
             "decorator_assigned": ", ".join(decorator_nc) if decorator_nc else "",
@@ -3924,8 +3963,10 @@ def notify_topper_sticker_if_approved(row, by):
     if str(row.get("sticker_required")) == "Yes":
         owner = disp(row.get("sticker_assigned_to"))
         if owner != "—":
+            sticker_count = int(row.get("sticker_count") or 1)
             create_notification(row.order_id, "Design & Innovation", owner,
-                                 f"🏷️ {row.order_id} ({disp(row.get('customer_name'))}) is confirmed — sticker needed. "
+                                 f"🏷️ {row.order_id} ({disp(row.get('customer_name'))}) is confirmed — "
+                                 f"{sticker_count} sticker{'s' if sticker_count != 1 else ''} needed. "
                                  f"Notes: {disp(row.get('sticker_notes'))}.")
 
 
@@ -3967,14 +4008,25 @@ def render_finance():
                     st.success("Payment confirmed — abrupt order from inventory, baking skipped, sent straight to Piling.")
                 else:
                     update_order(row.order_id, {
-                        "workflow_status":"Deposit Confirmed", "current_owner":"Production Planning",
-                        "next_action":"Plan production / check baked inventory", "payment_status":"Confirmed",
+                        "workflow_status":"Production Planned", "current_owner":"Baking",
+                        "next_action":"Baking team to start", "payment_status":"Confirmed",
+                        "production_planned_at":now_iso(), "baking_status":"Not Started",
                         "finance_confirmation_status":"Confirmed" if float(row.get("balance") or 0) == 0 else "Pending"
-                    }, by, "Order Payment Confirmed", "Finance")
-                    create_notification(row.order_id, "Production Planning", None,
-                                         f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — payment confirmed, ready to plan production.")
+                    }, by, "Order Payment Confirmed — Released Directly to Baking", "Finance")
+                    baker = row.get("baker_assigned")
+                    mixers = row.get("mixer_assigned")
+                    oven_people = row.get("oven_person_assigned")
+                    if disp(baker) != "—":
+                        create_notification(row.order_id, "Baking", baker,
+                                             f"🔥 {row.order_id} ({disp(row.get('customer_name'))}) is payment-confirmed and assigned to you as Baker in Charge. Start baking.")
+                    for person in _split_people(mixers):
+                        create_notification(row.order_id, "Baking", person,
+                                             f"🥣 {row.order_id} ({disp(row.get('customer_name'))}) is payment-confirmed — you are assigned as Mixer.")
+                    for person in _split_people(oven_people):
+                        create_notification(row.order_id, "Baking", person,
+                                             f"🔥 {row.order_id} ({disp(row.get('customer_name'))}) is payment-confirmed — you are Oven In Charge.")
                     notify_topper_sticker_if_approved(row, by)
-                    st.success("Payment confirmed.")
+                    st.success("Payment confirmed — sent straight to the assigned Baking team.")
                 st.rerun()
 
     with t2:
@@ -4005,13 +4057,24 @@ def render_finance():
                     st.success("Approved — abrupt order from inventory, baking skipped, sent straight to Piling.")
                 else:
                     update_order(row.order_id, {
-                        "workflow_status":"Deposit Confirmed", "current_owner":"Production Planning",
-                        "next_action":"Plan production / check baked inventory", "payment_status":"Approved for Pay on Delivery"
-                    }, by, "No Deposit Order Approved", "Finance")
-                    create_notification(row.order_id, "Production Planning", None,
-                                         f"💰 {row.order_id} ({disp(row.get('customer_name'))}) — approved for pay-on-delivery, ready to plan production.")
+                        "workflow_status":"Production Planned", "current_owner":"Baking",
+                        "next_action":"Baking team to start", "payment_status":"Approved for Pay on Delivery",
+                        "production_planned_at":now_iso(), "baking_status":"Not Started"
+                    }, by, "No Deposit Order Approved — Released Directly to Baking", "Finance")
+                    baker = row.get("baker_assigned")
+                    mixers = row.get("mixer_assigned")
+                    oven_people = row.get("oven_person_assigned")
+                    if disp(baker) != "—":
+                        create_notification(row.order_id, "Baking", baker,
+                                             f"🔥 {row.order_id} ({disp(row.get('customer_name'))}) is approved for pay-on-delivery and assigned to you as Baker in Charge. Start baking.")
+                    for person in _split_people(mixers):
+                        create_notification(row.order_id, "Baking", person,
+                                             f"🥣 {row.order_id} ({disp(row.get('customer_name'))}) is approved — you are assigned as Mixer.")
+                    for person in _split_people(oven_people):
+                        create_notification(row.order_id, "Baking", person,
+                                             f"🔥 {row.order_id} ({disp(row.get('customer_name'))}) is approved — you are Oven In Charge.")
                     notify_topper_sticker_if_approved(row, by)
-                    st.success("Approved and released to Production Planning.")
+                    st.success("Approved — sent straight to the assigned Baking team.")
                 st.rerun()
             if b.button("❌ Hold Order", width='stretch'):
                 update_order(row.order_id, {"workflow_status":"Payment Hold","current_owner":"Customer Care","next_action":"Review payment arrangement"},
@@ -4692,8 +4755,170 @@ def reopen_batch_cake(order_id, by):
         conn.commit()
 
 
+
+def render_baking_simple_view():
+    """Phone-first live queue for the Baking department.
+
+    Customer Care has already chosen the Baker in Charge, Mixer(s), and Oven In Charge.
+    Anyone on that crew can see the cake. Only one selected cake is rendered at a time, and
+    the queue is urgency-first to keep low-cost phones responsive.
+    """
+    my_name = st.session_state.get("staff_name", "").strip()
+    is_hod = st.session_state.get("is_hod")
+    df = load_orders()
+    q = df[df["workflow_status"].isin(["Production Planned", "Baking", "Baking Correction Required"])].copy() if not df.empty else df.iloc[0:0]
+    if not q.empty and "baking_batch_number" in q.columns:
+        # Batch cakes have their own batch board in Full View; don't duplicate them in the phone queue.
+        batched = q["baking_batch_number"].fillna("").astype(str).str.strip() != ""
+        q = q[~batched]
+
+    if not is_hod and not q.empty and my_name:
+        crew_blob = (
+            q.get("baker_assigned", pd.Series("", index=q.index)).fillna("").astype(str) + " | " +
+            q.get("mixer_assigned", pd.Series("", index=q.index)).fillna("").astype(str) + " | " +
+            q.get("oven_person_assigned", pd.Series("", index=q.index)).fillna("").astype(str)
+        )
+        q = q[crew_blob.str.contains(my_name, case=False, regex=False, na=False)]
+
+    if q.empty:
+        st.success("🎉 No baking jobs waiting for you right now.")
+        return
+
+    def _sort_tuple(r):
+        urgent = 0 if str(r.get("urgency_level") or "").strip().lower() == "urgent" else 1
+        due = pd.to_datetime(r.get("due_date"), errors="coerce")
+        due = due if not pd.isna(due) else pd.Timestamp.max
+        try:
+            tm = datetime.strptime(str(r.get("expected_time") or "23:59")[:5], "%H:%M").time()
+        except Exception:
+            tm = dtime(23, 59)
+        status_rank = {"Baking Correction Required": 0, "Baking": 1, "Production Planned": 2}.get(str(r.get("workflow_status")), 3)
+        return (urgent, due, tm, status_rank)
+
+    q["_sort"] = q.apply(_sort_tuple, axis=1)
+    q = q.sort_values("_sort", kind="stable").reset_index(drop=True)
+    ids = q["order_id"].astype(str).tolist()
+    rows = {str(r.get("order_id")): r for _, r in q.iterrows()}
+    key = "baking_mobile_pick"
+    if st.session_state.get(key) not in ids:
+        st.session_state[key] = ids[0]
+
+    st.markdown("""
+    <style>
+    div[data-testid="stRadio"] div[role="radiogroup"]{display:flex!important;flex-wrap:nowrap!important;overflow-x:auto!important;gap:.45rem!important;padding:.25rem .05rem .65rem!important;-webkit-overflow-scrolling:touch}
+    div[data-testid="stRadio"] div[role="radiogroup"]>label{flex:0 0 auto!important;min-height:46px;padding:.45rem .65rem!important;border:1px solid #D7C6DF;border-radius:10px;background:#F7F1FA;white-space:nowrap}
+    div[data-testid="stButton"]>button{min-height:56px!important;font-size:1.03rem!important;font-weight:700!important;border-radius:10px!important}
+    @media(max-width:640px){.block-container{padding-left:.65rem!important;padding-right:.65rem!important;padding-top:.7rem!important}div[data-testid="stImage"] img{width:100%!important;height:auto!important;border-radius:12px!important}}
+    </style>
+    """, unsafe_allow_html=True)
+
+    def _label(oid):
+        r = rows[str(oid)]
+        urgent = "🚨 " if str(r.get("urgency_level") or "").lower() == "urgent" else ""
+        status = "🔁 " if r.get("workflow_status") == "Baking Correction Required" else ("🔥 " if r.get("workflow_status") == "Baking" else "")
+        due = disp(r.get("due_date")); tm = disp(r.get("expected_time"))
+        short = due[5:] if len(due) >= 10 and due[4:5] == "-" else due
+        return f"{urgent}{status}{oid} • {short}" + (f" {tm}" if tm != "—" else "")
+
+    st.markdown(f"**🔥 BAKING QUEUE — {len(q)} job(s), most urgent first. Swipe left/right.**")
+    oid = st.radio("Baking queue", ids, key=key, horizontal=True, label_visibility="collapsed", format_func=_label)
+    row = rows[str(oid)]
+
+    render_reference_images(row)
+    urgent = "🚨 URGENT — " if str(row.get("urgency_level") or "").lower() == "urgent" else ""
+    st.markdown(f"### {urgent}{row.get('order_id')} — {disp(row.get('customer_name'))}")
+    st.markdown(f"**Due:** {disp(row.get('due_date'))} at {disp(row.get('expected_time'))}")
+    st.markdown(f"**Flavours:** {disp(row.get('flavours'))}")
+    st.markdown(f"**Size:** {disp(row.get('cake_size_value'))}\" {disp(row.get('cake_shape'))} · **Layers:** {disp(row.get('final_approved_layers'))}")
+    st.markdown(f"**Baker in Charge:** {disp(row.get('baker_assigned'))}")
+    st.markdown(f"**Mixer:** {disp(row.get('mixer_assigned'))}")
+    st.markdown(f"**Oven In Charge:** {disp(row.get('oven_person_assigned'))}")
+
+    # Tell the logged-in worker why this card is on their phone.
+    my_roles = []
+    if my_name and my_name.lower() in str(row.get("baker_assigned") or "").lower(): my_roles.append("Baker in Charge")
+    if my_name and my_name.lower() in str(row.get("mixer_assigned") or "").lower(): my_roles.append("Mixer")
+    if my_name and my_name.lower() in str(row.get("oven_person_assigned") or "").lower(): my_roles.append("Oven In Charge")
+    if my_roles:
+        st.info("Your role on this cake: **" + " + ".join(my_roles) + "**")
+
+    notes = disp(row.get("design_description"))
+    if notes != "—":
+        st.markdown("### **INSTRUCTIONS**")
+        pieces = [x.strip(" -•\t") for x in re.split(r"[\n*]+", str(notes)) if x.strip(" -•\t")]
+        for i, piece in enumerate(pieces or [notes], 1):
+            piece = re.sub(r"^\d+[.):]\s*", "", str(piece)).strip()
+            st.markdown(f"**{i}. {piece}**")
+
+    status = row.get("workflow_status")
+    if status == "Baking Correction Required":
+        st.error(f"Correction required: {disp(row.get('issue_notes'))}")
+        by = st.text_input("Corrected by", value=my_name or disp(row.get("baker_assigned")), key=f"mob_bake_corr_by_{oid}")
+        if st.button("🔁 Correction complete — return to baking", key=f"mob_bake_corr_{oid}", width='stretch'):
+            update_order(row.order_id, {"workflow_status":"Baking", "current_owner":"Baking", "next_action":"Complete corrected bake", "baking_status":"In Progress"}, by, "Baking Correction Completed", "Baking")
+            st.rerun()
+        return
+
+    has_materials = render_stage_material_planning("Baking", row, row.get("baker_assigned"), key_prefix=f"mobile_bake_{oid}")
+    by = st.text_input("Working on this cake", value=my_name or disp(row.get("baker_assigned")), key=f"mob_bake_by_{oid}")
+
+    if status == "Production Planned":
+        start_temp = st.number_input("Oven start temperature (°C)", min_value=0, max_value=300, value=180, step=5, key=f"mob_bake_start_temp_{oid}")
+        if not has_materials:
+            st.caption("Log at least one baking material above before starting.")
+        if st.button("▶️ START BAKING", key=f"mob_bake_start_{oid}", width='stretch', disabled=not has_materials):
+            started = now_iso()
+            update_order(row.order_id, {"workflow_status":"Baking", "current_owner":"Baking", "next_action":"Bake and complete oven check", "baking_started_at":started, "baking_status":"In Progress"}, by, "Baking Started", "Baking")
+            with connect() as conn:
+                conn.execute("""INSERT INTO oven_logs(order_id, flavour, product_type, start_temp_c, oven_start_at, recorded_by_start)
+                                VALUES(?,?,?,?,?,?)""", (row.order_id, row.get("flavours"), row.get("product_type"), start_temp, started, by))
+                conn.commit()
+            st.rerun()
+        return
+
+    required = baking_minimum_minutes(row)
+    elapsed = minutes_elapsed_since(row.get("baking_started_at"))
+    if elapsed is not None and elapsed < required:
+        st.warning(f"⏳ Baking for {elapsed:.0f} of minimum {required} minutes — about {max(required-elapsed,0):.0f} minute(s) remaining.")
+    elif elapsed is not None:
+        st.success(f"✅ Minimum baking time of {required} minutes met.")
+    stop_temp = st.number_input("Final oven temperature (°C)", min_value=0, max_value=300, value=180, step=5, key=f"mob_bake_stop_temp_{oid}")
+    can_finish = has_materials and (elapsed is None or elapsed >= required)
+    ptype = row.get("product_type") or "Cake"
+    short = ptype in SHORT_PIPELINE_PRODUCTS
+    label = "✅ BAKED → SEND TO PACKAGING" if short else "✅ BAKED → SEND TO PILER"
+    if st.button(label, key=f"mob_bake_done_{oid}", width='stretch', disabled=not can_finish):
+        stopped = now_iso()
+        with connect() as conn:
+            open_id = conn.execute("SELECT id FROM oven_logs WHERE order_id=? AND stop_temp_c IS NULL ORDER BY id DESC LIMIT 1", (row.order_id,)).fetchone()
+            if open_id:
+                conn.execute("UPDATE oven_logs SET stop_temp_c=?, oven_stop_at=?, recorded_by_stop=? WHERE id=?", (stop_temp, stopped, by, open_id[0]))
+                conn.commit()
+        if short:
+            insert_stage_check(row.order_id, "Baking", "Packaging", by, "Passed")
+            update_order(row.order_id, {"workflow_status":"Ready for Packaging", "current_owner":"Packaging", "next_action":"Pack and print delivery note", "baking_completed_at":stopped, "baking_status":"Complete"}, by, f"Baking Passed — {ptype}", "Baking")
+            create_notification(row.order_id, "Packaging", None, f"✅ {row.order_id} ({disp(row.get('customer_name'))}) has finished baking and is ready to package.")
+            notify_cake_finished(row.order_id, f"✅ {row.order_id} ({disp(row.get('flavours'))}) is out of the oven and ready for Packaging.", mixers=row.get("mixer_assigned"), oven_crew=row.get("oven_person_assigned"))
+        else:
+            insert_stage_check(row.order_id, "Baking", "Piling", by, "Passed")
+            update_order(row.order_id, {"workflow_status":"Piling Incoming", "current_owner":"Filling / Piling", "next_action":"Piler to accept cake", "baking_completed_at":stopped, "baking_status":"Complete"}, by, "Baking Passed", "Baking")
+            create_notification(row.order_id, "Filling / Piling", row.get("piler_assigned"), f"🎂 {row.order_id} ({disp(row.get('customer_name'))}) has finished baking and is ready to pile.")
+            notify_cake_finished(row.order_id, f"🎂 {row.order_id} ({disp(row.get('flavours'))}) is out of the oven and ready to pile / assemble.", mixers=row.get("mixer_assigned"), oven_crew=row.get("oven_person_assigned"), assemblers=row.get("piler_assigned"))
+        st.rerun()
+
+
+if hasattr(st, "fragment"):
+    render_baking_simple_view_live = st.fragment(run_every="10s")(render_baking_simple_view)
+else:
+    render_baking_simple_view_live = render_baking_simple_view
+
 def render_baking():
-    page_header("🍰 Baking", "Bake layers, submit for baking check, and correct rejected cakes.")
+    page_header("🔥 Baking", "Customer Care assigns Baker, Mixer and Oven In Charge at order entry. After Finance approves, the cake appears here immediately.")
+    view_mode = st.radio("View", ["📷 Simple View", "📋 Full View"], key="baking_view_mode", horizontal=True,
+                         index=(0 if st.session_state.get("baking_view_mode", "📷 Simple View") == "📷 Simple View" else 1))
+    if view_mode == "📷 Simple View":
+        render_baking_simple_view_live()
+        return
     df = load_orders()
     render_hod_overview("Baking", df)
     tab_batch, tab_assigned, tab_progress, tab_correction, tab_cakeinv, tab_cookieinv, tab_oven, tab_finished, tab_gallery = st.tabs(
@@ -5425,13 +5650,16 @@ def render_design_innovation():
     else:
         st.markdown("### 🏷️ Sticker Priority Queue")
         sq_active = sq[~sq["sticker_status"].isin(["Ready", "Received by Decorator"])]
-        st.dataframe(sq[["order_id","customer_name","sticker_notes","decorator_assigned","due_date","expected_time","sticker_status","sticker_assigned_to"]],
-                     hide_index=True, width='stretch')
+        sticker_cols = [c for c in ["order_id","customer_name","sticker_count","sticker_1_notes","sticker_2_notes","decorator_assigned","due_date","expected_time","sticker_status","sticker_assigned_to"] if c in sq.columns]
+        st.dataframe(sq[sticker_cols], hide_index=True, width='stretch')
         srow = select_order(sq_active, "sticker_task") if not sq_active.empty else None
         if srow is None:
             st.success("All sticker tasks are completed.")
         else:
-            order_card(srow, [("Sticker Notes", srow.get("sticker_notes")), ("Decorator", srow.get("decorator_assigned")), ("Status", srow.get("sticker_status"))])
+            order_card(srow, [("Sticker Count", srow.get("sticker_count") or 1),
+                              ("Sticker 1", srow.get("sticker_1_notes") or srow.get("sticker_notes")),
+                              ("Sticker 2", srow.get("sticker_2_notes")),
+                              ("Decorator", srow.get("decorator_assigned")), ("Status", srow.get("sticker_status"))])
             render_stage_material_planning("Design & Innovation", srow, srow.get("sticker_assigned_to"), key_prefix="sticker")
             sby = st.text_input("Updated by", value=disp(srow.get("sticker_assigned_to")) if disp(srow.get("sticker_assigned_to")) != "—" else "Doreen", key="sticker_updated_by")
             sa, sb = st.columns(2)
@@ -5439,7 +5667,8 @@ def render_design_innovation():
                 update_order(srow.order_id, {"sticker_status":"In Progress"}, sby, "Sticker Started", "Design & Innovation"); st.rerun()
             if sb.button("✅ Sticker Ready", width='stretch'):
                 sdecorator = disp(srow.get("decorator_assigned"))
-                smessage = f"🏷️ The sticker is ready for order {srow.order_id} ({disp(srow.get('customer_name'))}) — pick it up from {sby}."
+                _scount = int(srow.get("sticker_count") or 1)
+                smessage = f"🏷️ {_scount} sticker{'s are' if _scount != 1 else ' is'} ready for order {srow.order_id} ({disp(srow.get('customer_name'))}) — pick up from {sby}."
                 update_order(srow.order_id, {"sticker_status":"Ready", "sticker_ready_at":now_iso(), "sticker_pickup_note":smessage}, sby, "Sticker Ready", "Design & Innovation")
                 create_notification(srow.order_id, "Decoration", sdecorator, smessage)
                 st.success(f"Sticker ready. {sdecorator} notified."); st.rerun()
