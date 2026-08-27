@@ -1126,9 +1126,26 @@ def _render_department_notifications_body():
     st.markdown("### 🔔 Notifications")
     for _, n in mine.sort_values("created_at", ascending=False).iterrows():
         person = disp(n.get("target_person"))
-        is_complaint = str(n.get("message", "")).startswith("Complaint ")
-        icon = "🚨" if is_complaint else "🔔"
-        st.warning(f"{icon} {n['message']}" + (f" (For: {person})" if person != "—" else ""))
+        message = str(n.get("message", ""))
+        is_complaint = message.startswith("Complaint ")
+        is_cake_chat = ("mentioned you on cake" in message.lower() or "replied on cake" in message.lower()
+                        or "mentioned you in order" in message.lower())
+        icon = "🚨" if is_complaint else ("💬" if is_cake_chat else "🔔")
+        st.warning(f"{icon} {message}" + (f" (For: {person})" if person != "—" else ""))
+        oid = str(n.get("order_id", "") or "").strip()
+        if oid and is_cake_chat:
+            if st.button("💬 Open cake chat & reply", key=f"notif_open_thread_{int(n['id'])}", width='stretch'):
+                # Mark only this message as read, remember exactly which cake Brenda/Desmond
+                # needs, then force the next rerun straight into that cake's conversation.
+                with connect() as conn:
+                    conn.execute(
+                        "UPDATE notifications SET notification_status='Read', read_at=?, acknowledged_by=? WHERE id=?",
+                        (now_iso(), staff_name or dept, int(n["id"])),
+                    )
+                    conn.commit()
+                st.session_state["_open_order_thread"] = oid
+                st.session_state["_force_page"] = "Team Chat & AI"
+                st.rerun()
 
     ack_by = st.text_input("Acknowledged by", value=staff_name or dept, key=f"notif_ack_{dept}")
     if st.button("Mark all as read", key=f"notif_read_{dept}"):
@@ -2064,7 +2081,7 @@ def _person_matches(person, username):
     return bool(p_parts & u_parts)
 
 
-def send_push_to_people(people, title, body):
+def send_push_to_people(people, title, body, url=None):
     """Push straight to named individuals (mixers, oven crew, assemblers) instead of blasting a
     whole department. Never raises — notifications must not be able to break the workflow."""
     names = [n for n in people if str(n).strip()]
@@ -2094,7 +2111,7 @@ def send_push_to_people(people, title, body):
         try:
             webpush(
                 subscription_info=json.loads(sub["subscription_json"]),
-                data=json.dumps({"title": title, "body": body}),
+                data=json.dumps({"title": title, "body": body, "url": url or "/"}),
                 vapid_private_key=str(VAPID_PRIVATE_KEY_FILE),
                 vapid_claims=dict(VAPID_CLAIMS),
                 ttl=86400,
@@ -2223,9 +2240,36 @@ def parse_mentions(message: str):
 
 
 def add_order_comment(order_id, message, author_username, author_name, author_department, is_ai=False):
-    """Save one comment and fire notification + push to everyone @mentioned."""
+    """Save one order-thread message and alert the right people.
+
+    A cake thread now behaves like a real conversation: explicit @mentions are notified,
+    and when somebody replies without typing an @name, the author of the most recent human
+    message is notified automatically. This fixes the old one-way flow where Brenda could
+    receive Desmond's mention but Desmond would not know she had replied unless she manually
+    typed @desmond again.
+    """
     ensure_collaboration_schema()
     mentions = [] if is_ai else parse_mentions(message)
+
+    # Remember the previous human speaker BEFORE inserting the new message. They become the
+    # automatic reply target unless the new author is replying to themselves or already
+    # mentioned them explicitly.
+    reply_username = None
+    if not is_ai and order_id != GENERAL_THREAD_ID:
+        try:
+            with connect() as conn:
+                prev = conn.execute(
+                    """SELECT author_username FROM order_comments
+                       WHERE order_id=? AND is_ai!='Yes' AND COALESCE(author_username,'')!=''
+                       ORDER BY id DESC LIMIT 1""", (order_id,)
+                ).fetchone()
+            if prev:
+                candidate = str(prev["author_username"] or "").strip()
+                if candidate and candidate.lower() != str(author_username or "").strip().lower():
+                    reply_username = candidate
+        except Exception as e:
+            print(f"[COMMENTS] Could not resolve reply target: {e}", flush=True)
+
     with connect() as conn:
         conn.execute("""INSERT INTO order_comments(order_id, author_username, author_name,
                         author_department, message, mentions, is_ai, created_at)
@@ -2234,31 +2278,44 @@ def add_order_comment(order_id, message, author_username, author_name, author_de
                       message, ",".join(mentions), "Yes" if is_ai else "No", now_iso()))
         conn.commit()
 
-    if not mentions:
+    if is_ai:
         return []
 
-    where = "the team chat" if order_id == GENERAL_THREAD_ID else f"order {order_id}"
-    body = f"{first_name(author_name)} mentioned you in {where}: {message[:120]}"
+    recipients = set(mentions)
+    if reply_username:
+        recipients.add(reply_username)
+    recipients.discard(str(author_username or "").strip())
+    recipients = sorted(r for r in recipients if r)
+    if not recipients:
+        return []
+
+    explicit = set(mentions)
     people = _all_mentionable_people()
     by_username = {u: (fn, dp) for u, fn, dp in people}
-    for uname in mentions:
+    for uname in recipients:
         full_name, departments = by_username.get(uname, (uname, ""))
         dept = (departments.split(",")[0] or "").strip() if departments else ""
+        if uname in explicit:
+            body = f"{first_name(author_name)} mentioned you on cake {order_id}: {message[:120]}"
+        else:
+            body = f"{first_name(author_name)} replied on cake {order_id}: {message[:120]}"
         try:
             with connect() as conn:
                 conn.execute("""INSERT INTO notifications(order_id,target_department,target_person,
                                 message,notification_status,created_at) VALUES(?,?,?,?,?,?)""",
-                             (None if order_id == GENERAL_THREAD_ID else order_id,
-                              dept, full_name, body, "Unread", now_iso()))
+                             (order_id, dept, full_name, body, "Unread", now_iso()))
                 conn.commit()
         except Exception as e:
-            print(f"[COMMENTS] Could not create in-app mention note for {uname}: {e}", flush=True)
-    try:
-        send_push_to_people(mentions, "You were mentioned — Cake Album", body)
-    except Exception as e:
-        print(f"[COMMENTS] Push for mentions failed: {e}", flush=True)
-    return mentions
+            print(f"[COMMENTS] Could not create cake-chat notification for {uname}: {e}", flush=True)
 
+    # Phone push carries the order reference too. The in-app notification always provides a
+    # reliable Open & Reply button; the push URL is a useful hint for installed/PWA clients.
+    try:
+        body = f"{first_name(author_name)} sent a message on cake {order_id}: {message[:120]}"
+        send_push_to_people(recipients, "Cake message — reply needed", body, url=f"/?thread={order_id}")
+    except Exception as e:
+        print(f"[COMMENTS] Push for cake conversation failed: {e}", flush=True)
+    return recipients
 
 def load_order_comments(order_id, limit=200):
     ensure_collaboration_schema()
@@ -2438,6 +2495,23 @@ def render_team_hub():
     page_header("Team Chat & AI Assistant", "Talk to each other on the order itself — and ask the ERP anything.")
     ensure_collaboration_schema()
     df = load_orders()
+
+    # If the worker arrived from a cake-message notification, do not make them search for
+    # the order again. Put the exact conversation at the top, already expanded and ready
+    # for typing — WhatsApp-like: notification -> conversation -> reply.
+    open_thread = st.session_state.get("_open_order_thread")
+    if open_thread:
+        focus = df[df["order_id"].astype(str) == str(open_thread)] if not df.empty and "order_id" in df.columns else pd.DataFrame()
+        st.markdown("## 💬 Reply to this cake")
+        if not focus.empty:
+            order_card(focus.iloc[0], show_image=False)
+        else:
+            st.info(f"Cake {open_thread} is not in the current active order list, but its conversation is still available below.")
+        render_order_comments(str(open_thread), key_suffix="notification_reply", title="💬 Cake Conversation", expanded=True)
+        if st.button("✅ Done with this conversation", key="close_notification_thread", width='stretch'):
+            st.session_state.pop("_open_order_thread", None)
+            st.rerun()
+        st.divider()
 
     tab_general, tab_order, tab_ai = st.tabs(["🗣️ Team Chat", "📦 Order Threads", "🤖 Ask the ERP"])
 
@@ -7163,6 +7237,10 @@ def render_sidebar():
             pass
         st.rerun()
 
+    forced_page = st.session_state.pop("_force_page", None)
+    if forced_page == "Team Chat & AI":
+        return "Team Chat & AI"
+
     allowed = st.session_state.get("departments") or [st.session_state.department]
     allowed = ["Studio / Final QC" if d == "Packaging" else d for d in allowed]
     allowed = list(dict.fromkeys(allowed))
@@ -7433,6 +7511,18 @@ def main():
         st.info(f"You were logged out after {SESSION_TIMEOUT_HOURS} hours for security. Please log back in.")
     if not st.session_state.authenticated:
         render_login(); return
+    # A phone push may return with ?thread=ORDER_ID. Convert it into the same in-app
+    # navigation state used by the Open cake chat button, then remove the one-shot parameter.
+    try:
+        thread_q = st.query_params.get("thread")
+        if isinstance(thread_q, list):
+            thread_q = thread_q[0] if thread_q else None
+        if thread_q:
+            st.session_state["_open_order_thread"] = str(thread_q)
+            st.session_state["_force_page"] = "Team Chat & AI"
+            del st.query_params["thread"]
+    except Exception:
+        pass
     page = render_sidebar()
     PAGES[page]()
     render_auto_refresh_toggle(key_suffix="_bottom")
