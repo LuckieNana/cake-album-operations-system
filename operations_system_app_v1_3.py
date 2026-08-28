@@ -2508,14 +2508,14 @@ def render_team_hub():
         focus = df[df["order_id"].astype(str) == str(open_thread)] if not df.empty and "order_id" in df.columns else pd.DataFrame()
         st.markdown("## 💬 Reply to this cake")
         if not focus.empty:
-            order_card(focus.iloc[0], show_image=False)
+            order_card(focus.iloc[0], show_image=False, show_comments=False)
         else:
             st.info(f"Cake {open_thread} is not in the current active order list, but its conversation is still available below.")
         render_order_comments(str(open_thread), key_suffix="notification_reply", title="💬 Cake Conversation", expanded=True)
         if st.button("✅ Done with this conversation", key="close_notification_thread", width='stretch'):
             st.session_state.pop("_open_order_thread", None)
             st.rerun()
-        st.divider()
+        return
 
     tab_general, tab_order, tab_ai = st.tabs(["🗣️ Team Chat", "📦 Order Threads", "🤖 Ask the ERP"])
 
@@ -2926,7 +2926,7 @@ def select_order(df, key, label="Select an order"):
     return d[d["_label"] == choice].iloc[0]
 
 
-def order_card(row, extra=None, show_image=True):
+def order_card(row, extra=None, show_image=True, show_comments=True):
     show_due_alert(row)
     ptype = row.get("product_type") or "Cake"
     is_short_pipeline = ptype in SHORT_PIPELINE_PRODUCTS
@@ -3049,7 +3049,7 @@ def order_card(row, extra=None, show_image=True):
                 except Exception:
                     st.caption(f"Couldn't preview {vr['filename']} — file may be corrupted.")
 
-    if order_id_for_videos:
+    if order_id_for_videos and show_comments:
         try:
             render_order_comments(order_id_for_videos, key_suffix="card")
         except Exception as _e:
@@ -7496,7 +7496,7 @@ def render_sidebar():
         st.rerun()
 
     forced_page = st.session_state.pop("_force_page", None)
-    if forced_page == "Team Chat & AI":
+    if forced_page == "Team Chat & AI" or st.session_state.get("_open_order_thread"):
         return "Team Chat & AI"
 
     allowed = st.session_state.get("departments") or [st.session_state.department]
