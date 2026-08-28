@@ -3727,6 +3727,56 @@ def render_customer_care():
         "Customer Phone *", key=phone_key,
         on_change=lambda: save_draft_field("nc_customer_phone", st.session_state.get(phone_key, "")))
 
+    # Topper controls live OUTSIDE the main Streamlit form so they can react immediately.
+    # Streamlit form widgets only update after form submission, which prevented the old
+    # Yes/No -> count -> detail fields from appearing dynamically.
+    topper_required = "No"
+    topper_count = 0
+    topper_1_wording = topper_1_notes = ""
+    topper_2_wording = topper_2_notes = ""
+    topper_3_wording = topper_3_notes = ""
+    topper_wording = topper_notes = ""
+
+    if product_type == "Cake":
+        st.markdown("### Topper Requirements")
+        topper_required = st.selectbox(
+            "Does this cake need a topper?",
+            ["No", "Yes"],
+            key="nc_topper_required",
+        )
+        if topper_required == "Yes":
+            topper_count = st.selectbox(
+                "How many toppers does this cake need?",
+                [1, 2, 3],
+                key="nc_topper_count",
+            )
+            st.caption("Enter the wording/design details for each topper below.")
+            topper_values = {}
+            for topper_no in range(1, int(topper_count) + 1):
+                st.markdown(f"**Topper {topper_no}**")
+                wording = st.text_input(
+                    f"Words on Topper {topper_no}",
+                    key=f"nc_topper_{topper_no}_wording",
+                )
+                notes = st.text_area(
+                    f"Topper {topper_no} Style / Design Notes",
+                    key=f"nc_topper_{topper_no}_notes",
+                )
+                topper_values[topper_no] = (wording, notes)
+
+            topper_1_wording, topper_1_notes = topper_values.get(1, ("", ""))
+            topper_2_wording, topper_2_notes = topper_values.get(2, ("", ""))
+            topper_3_wording, topper_3_notes = topper_values.get(3, ("", ""))
+
+            topper_wording_parts, topper_notes_parts = [], []
+            for topper_no, (wording, notes) in topper_values.items():
+                if str(wording).strip():
+                    topper_wording_parts.append(f"Topper {topper_no}: {str(wording).strip()}")
+                if str(notes).strip():
+                    topper_notes_parts.append(f"Topper {topper_no}: {str(notes).strip()}")
+            topper_wording = " | ".join(topper_wording_parts)
+            topper_notes = " | ".join(topper_notes_parts)
+
     order_form_gen = st.session_state.get("nc_order_form_gen", 0)
     with st.form(f"new_order_form_{order_form_gen}", clear_on_submit=False):
         st.markdown("### Order Type")
@@ -3742,48 +3792,6 @@ def render_customer_care():
                                  help="For clients who send a short video instead of (or alongside) photos.")
 
         if product_type == "Cake":
-            st.markdown("### Topper Requirements")
-            # IMPORTANT: this section sits inside the main Streamlit form. Widgets inside a form
-            # do not trigger an immediate rerun, so a conditional "Topper Needed? -> show count"
-            # made the count look like it was missing. Keep the count visible at all times.
-            topper_count = st.selectbox(
-                "How many toppers does this cake need?",
-                [0, 1, 2, 3],
-                index=0,
-                key="nc_topper_count",
-                help="Choose 0 for no topper, or 1, 2, or 3 toppers."
-            )
-            topper_required = "Yes" if int(topper_count or 0) > 0 else "No"
-            topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = topper_3_wording = topper_3_notes = ""
-
-            # Render all three topper detail slots so the form remains responsive even though
-            # Streamlit form widgets do not rerun until submission. Customer Care only fills
-            # the number selected above; unused slots are ignored when saving.
-            st.caption("If you select 1, fill Topper 1 only. If 2, fill Topper 1 & 2. If 3, fill all three.")
-            for topper_no in range(1, 4):
-                st.markdown(f"**Topper {topper_no}**")
-                wording = st.text_input(f"Words on Topper {topper_no}", key=f"nc_topper_{topper_no}_wording")
-                notes = st.text_area(f"Topper {topper_no} Style / Design Notes", key=f"nc_topper_{topper_no}_notes")
-                if topper_no == 1:
-                    topper_1_wording, topper_1_notes = wording, notes
-                elif topper_no == 2:
-                    topper_2_wording, topper_2_notes = wording, notes
-                else:
-                    topper_3_wording, topper_3_notes = wording, notes
-            # Keep the original combined fields populated so existing topper queues,
-            # notifications and reports remain backward-compatible.
-            topper_wording_parts, topper_notes_parts = [], []
-            for topper_no, wording, notes in [
-                (1, topper_1_wording, topper_1_notes),
-                (2, topper_2_wording, topper_2_notes),
-                (3, topper_3_wording, topper_3_notes),
-            ]:
-                if topper_no <= int(topper_count or 0):
-                    if str(wording).strip(): topper_wording_parts.append(f"Topper {topper_no}: {str(wording).strip()}")
-                    if str(notes).strip(): topper_notes_parts.append(f"Topper {topper_no}: {str(notes).strip()}")
-            topper_wording = " | ".join(topper_wording_parts)
-            topper_notes = " | ".join(topper_notes_parts)
-
             st.markdown("### Sticker Requirements")
             sticker_required = st.selectbox("Does the cake need sticker(s)?", ["No", "Yes"], key="nc_sticker_required")
             sticker_count = 0
@@ -3896,7 +3904,21 @@ def render_customer_care():
             if sticker_required == "Yes":
                 sticker_owner_nc = st.text_input("Sticker assigned to", value="Doreen", key="nc_sticker_owner")
 
-        submitted = st.form_submit_button("Create New Order", width='stretch')
+        st.markdown(
+            """<style>
+            button[kind="primaryFormSubmit"] p,
+            button[kind="primaryFormSubmit"] span {
+                color: white !important;
+                font-weight: 800 !important;
+            }
+            button[kind="primaryFormSubmit"] {
+                color: white !important;
+                font-weight: 800 !important;
+            }
+            </style>""",
+            unsafe_allow_html=True,
+        )
+        submitted = st.form_submit_button("CREATE NEW ORDER", type="primary", width='stretch')
 
     if submitted:
         missing = [name for name,val in [("Customer Name",customer_name),("Customer Phone",customer_number),
