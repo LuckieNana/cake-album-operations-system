@@ -1755,6 +1755,7 @@ def ensure_release_2_schema():
             "topper_wording": "TEXT", "topper_notes": "TEXT",
             "topper_1_wording": "TEXT", "topper_1_notes": "TEXT",
             "topper_2_wording": "TEXT", "topper_2_notes": "TEXT",
+            "topper_3_wording": "TEXT", "topper_3_notes": "TEXT",
             "topper_status": "TEXT DEFAULT 'Not Required'", "topper_assigned_to": "TEXT",
             "topper_target_at": "TEXT", "topper_ready_at": "TEXT",
             "topper_received_by_decorator": "TEXT", "topper_received_at": "TEXT", "topper_pickup_note": "TEXT",
@@ -2508,14 +2509,14 @@ def render_team_hub():
         focus = df[df["order_id"].astype(str) == str(open_thread)] if not df.empty and "order_id" in df.columns else pd.DataFrame()
         st.markdown("## 💬 Reply to this cake")
         if not focus.empty:
-            order_card(focus.iloc[0], show_image=False, show_comments=False)
+            order_card(focus.iloc[0], show_image=False)
         else:
             st.info(f"Cake {open_thread} is not in the current active order list, but its conversation is still available below.")
         render_order_comments(str(open_thread), key_suffix="notification_reply", title="💬 Cake Conversation", expanded=True)
         if st.button("✅ Done with this conversation", key="close_notification_thread", width='stretch'):
             st.session_state.pop("_open_order_thread", None)
             st.rerun()
-        return
+        st.divider()
 
     tab_general, tab_order, tab_ai = st.tabs(["🗣️ Team Chat", "📦 Order Threads", "🤖 Ask the ERP"])
 
@@ -2552,64 +2553,77 @@ def render_team_hub():
 def render_stage_material_planning(stage, row, default_by, key_prefix=None):
     order_key = str(row.get("order_id") if hasattr(row, "get") else row.order_id).replace(" ", "_")
     key_prefix = f"mat_{stage}_{order_key}" if key_prefix is None else f"mat_{stage}_{order_key}_{key_prefix}"
+
+    # Fetch only this cake/stage instead of loading the full materials table on every phone.
+    with connect() as conn:
+        usage = pd.read_sql_query(
+            "SELECT * FROM stage_material_usage WHERE order_id=? AND stage=? ORDER BY id DESC",
+            conn, params=(row.order_id, stage)
+        )
+
     st.markdown("### Materials Planning / Usage")
-    st.caption("Record what this cake needs or uses — including colour, size, quantity, or weight — so Procurement can track usage.")
-    a,b,c = st.columns(3)
-    item_choice = a.selectbox("Material item", STAGE_MATERIALS.get(stage, ["Other"]), key=f"{key_prefix}_item")
-    item = st.text_input("Specify material name", key=f"{key_prefix}_item_other") if item_choice == "Other" else item_choice
-    is_size_family = item_choice in MATERIAL_SIZE_FAMILIES
-    if item_choice in MATERIAL_VARIANTS:
-        label = "Size" if is_size_family else "Colour / Flavor / Variant"
-        variant = b.selectbox(label, MATERIAL_VARIANTS[item_choice], key=f"{key_prefix}_variant")
+    if usage.empty:
+        st.warning("⚠️ Add at least one material before starting this stage.")
     else:
-        colour_choice = b.selectbox("Colour (if applicable)", MATERIAL_COLOURS, key=f"{key_prefix}_colour")
-        variant = "" if colour_choice == "N/A" else colour_choice
-    action = c.selectbox("Action", ["Used", "Needed", "Request from Procurement"], key=f"{key_prefix}_action")
-    skip_measuring = stage == "Decoration" and str(item_choice).strip().lower() in ("fondant", "buttercream")
-    if skip_measuring:
-        st.caption("Decorators don't measure Fondant/Buttercream by quantity — just logging that it was used, "
-                   "since Piling/Covering already measure and record the amounts for these.")
-        qty, unit, multiplier, total_qty = 1.0, "not measured", 1.0, 1.0
-    elif is_size_family:
-        qty = st.number_input("Quantity (pieces)", min_value=0.0, step=1.0, key=f"{key_prefix}_qty")
-        unit = "pieces"
-        multiplier = 1.0
-        total_qty = qty
-    else:
-        d,e,f = st.columns(3)
-        qty = d.number_input("Quantity / Weight per unit", min_value=0.0, step=0.5, key=f"{key_prefix}_qty",
-                              help="E.g. 175 if a recipe uses 175g of this per cake.")
-        unit = e.selectbox("Unit", ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml", "teaspoon", "tablespoon"], key=f"{key_prefix}_unit")
-        multiplier = f.number_input("Multiplier (batches, e.g. x3)", min_value=0.0, step=0.5, value=1.0, key=f"{key_prefix}_multiplier",
-                                     help="For scaling a recipe up — e.g. enter 3 to multiply 175g by 3, or 1.5 for one and a half times.")
-        total_qty = qty * multiplier
-        if multiplier != 1:
-            st.caption(f"= {qty:g} {unit} × {multiplier:g} = **{total_qty:g} {unit} total**")
-    by = st.text_input("Recorded by", value=str(default_by or stage), key=f"{key_prefix}_by")
-    if st.button("Add Material", key=f"{key_prefix}_add", width='stretch'):
-        if not str(item).strip():
-            st.error("Specify the material name.")
-        elif total_qty <= 0:
-            st.error("Enter a quantity/weight greater than zero.")
+        st.success(f"✅ {len(usage)} material entr{'y' if len(usage)==1 else 'ies'} saved — Start can proceed.")
+
+    # The old control looked like an action button even though the fields were already
+    # elsewhere on the page. On small phones that made staff think nothing happened.
+    # This expander makes the interaction explicit: tap it, the entry form opens, save it.
+    with st.expander("➕ ADD MATERIAL / USAGE", expanded=usage.empty):
+        st.caption("Tap here, enter what this cake needs/uses, then press SAVE MATERIAL.")
+        a, b = st.columns(2)
+        item_choice = a.selectbox("Material item", STAGE_MATERIALS.get(stage, ["Other"]), key=f"{key_prefix}_item")
+        item = st.text_input("Specify material name", key=f"{key_prefix}_item_other") if item_choice == "Other" else item_choice
+        is_size_family = item_choice in MATERIAL_SIZE_FAMILIES
+        if item_choice in MATERIAL_VARIANTS:
+            label = "Size" if is_size_family else "Colour / Flavor / Variant"
+            variant = b.selectbox(label, MATERIAL_VARIANTS[item_choice], key=f"{key_prefix}_variant")
         else:
-            colour_val = variant if (variant and not is_size_family) else ""
-            size_val = variant if (variant and is_size_family) else ""
-            item_label = f"{item} ({variant})" if variant else item
-            with connect() as conn:
-                conn.execute("""INSERT INTO stage_material_usage(order_id,stage,item_name,colour,size,quantity,unit,material_action,recorded_by,recorded_at,base_quantity,multiplier)
-                                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                             (row.order_id, stage, item, colour_val, size_val, total_qty, unit, action, by, now_iso(), qty, multiplier))
-                if action == "Request from Procurement":
-                    conn.execute("""INSERT INTO order_material_requirements(order_id,requested_by,item_name,quantity_required,unit,requirement_status,requested_at)
-                                    VALUES(?,?,?,?,?,?,?)""",
-                                 (row.order_id, by, item_label, total_qty, unit, "Submitted", now_iso()))
-                conn.commit()
-            audit_log(row.order_id, "Stage Material Recorded", stage, f"{item_label}: {qty:g} x {multiplier:g} = {total_qty:g} {unit} — {action}", by)
-            st.success("Material recorded.")
-            st.rerun()
-    usage = load_table("stage_material_usage")
-    usage = usage[(usage["order_id"] == row.order_id) & (usage["stage"] == stage)] if not usage.empty else usage
-    table(usage, ["id","item_name","colour","size","base_quantity","multiplier","quantity","unit","material_action","recorded_by","recorded_at"])
+            colour_choice = b.selectbox("Colour (if applicable)", MATERIAL_COLOURS, key=f"{key_prefix}_colour")
+            variant = "" if colour_choice == "N/A" else colour_choice
+        action = st.selectbox("Action", ["Used", "Needed", "Request from Procurement"], key=f"{key_prefix}_action")
+        skip_measuring = stage == "Decoration" and str(item_choice).strip().lower() in ("fondant", "buttercream")
+        if skip_measuring:
+            st.caption("Decorators don't measure Fondant/Buttercream by quantity — just log that it was used.")
+            qty, unit, multiplier, total_qty = 1.0, "not measured", 1.0, 1.0
+        elif is_size_family:
+            qty = st.number_input("Quantity (pieces)", min_value=0.0, step=1.0, key=f"{key_prefix}_qty")
+            unit, multiplier, total_qty = "pieces", 1.0, qty
+        else:
+            d, e = st.columns(2)
+            qty = d.number_input("Quantity / Weight per unit", min_value=0.0, step=0.5, key=f"{key_prefix}_qty")
+            unit = e.selectbox("Unit", ["kg", "grams", "pieces", "trays", "boxes", "litres", "ml", "teaspoon", "tablespoon"], key=f"{key_prefix}_unit")
+            multiplier = st.number_input("Multiplier (batches, e.g. x3)", min_value=0.0, step=0.5, value=1.0, key=f"{key_prefix}_multiplier")
+            total_qty = qty * multiplier
+            if multiplier != 1:
+                st.caption(f"= {qty:g} {unit} × {multiplier:g} = **{total_qty:g} {unit} total**")
+        by = st.text_input("Recorded by", value=str(default_by or stage), key=f"{key_prefix}_by")
+        if st.button("✅ SAVE MATERIAL", key=f"{key_prefix}_add", width='stretch'):
+            if not str(item).strip():
+                st.error("Specify the material name.")
+            elif total_qty <= 0:
+                st.error("Enter a quantity/weight greater than zero.")
+            else:
+                colour_val = variant if (variant and not is_size_family) else ""
+                size_val = variant if (variant and is_size_family) else ""
+                item_label = f"{item} ({variant})" if variant else item
+                with connect() as conn:
+                    conn.execute("""INSERT INTO stage_material_usage(order_id,stage,item_name,colour,size,quantity,unit,material_action,recorded_by,recorded_at,base_quantity,multiplier)
+                                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                 (row.order_id, stage, item, colour_val, size_val, total_qty, unit, action, by, now_iso(), qty, multiplier))
+                    if action == "Request from Procurement":
+                        conn.execute("""INSERT INTO order_material_requirements(order_id,requested_by,item_name,quantity_required,unit,requirement_status,requested_at)
+                                        VALUES(?,?,?,?,?,?,?)""",
+                                     (row.order_id, by, item_label, total_qty, unit, "Submitted", now_iso()))
+                    conn.commit()
+                audit_log(row.order_id, "Stage Material Recorded", stage, f"{item_label}: {qty:g} x {multiplier:g} = {total_qty:g} {unit} — {action}", by)
+                st.success("Material saved — Start Baking is now unlocked.")
+                st.rerun()
+
+    if not usage.empty:
+        with st.expander("📋 MATERIALS ALREADY SAVED", expanded=False):
+            table(usage, ["id","item_name","colour","size","base_quantity","multiplier","quantity","unit","material_action","recorded_by","recorded_at"])
 
     if not usage.empty and st.session_state.get("is_hod"):
         st.markdown("##### 👑 HOD: Correct or Remove an Entry")
@@ -2840,16 +2854,32 @@ def load_table(table):
 # -----------------------------
 
 def generate_order_id():
-    date_str = datetime.now().strftime('%Y%m%d')
+    """Allocate the next daily order number atomically.
+
+    Two Customer Care users can submit at almost the same moment. The old SELECT-max logic
+    allowed both sessions to choose the same next ID. This tiny SQLite transaction serializes
+    only the counter update (milliseconds), preventing collisions without slowing normal reads.
+    """
+    date_str = datetime.now().strftime("%Y%m%d")
     prefix = f"CA-{date_str}-"
     with connect() as conn:
-        existing = conn.execute("SELECT order_id FROM orders WHERE order_id LIKE ?", (f"{prefix}%",)).fetchall()
-    max_num = 1999
-    for (oid,) in existing:
-        suffix = oid[len(prefix):]
-        if suffix.isdigit():  # only count new-format IDs; old timestamp+hex IDs are safely ignored
-            max_num = max(max_num, int(suffix))
-    return f"{prefix}{max_num + 1}"
+        conn.execute("CREATE TABLE IF NOT EXISTS order_id_sequences(order_date TEXT PRIMARY KEY, last_num INTEGER NOT NULL)")
+        conn.execute("BEGIN IMMEDIATE")
+        # Bootstrap from any IDs that already exist for today, then increment once.
+        row = conn.execute("SELECT last_num FROM order_id_sequences WHERE order_date=?", (date_str,)).fetchone()
+        if row is None:
+            existing = conn.execute("SELECT order_id FROM orders WHERE order_id LIKE ?", (f"{prefix}%",)).fetchall()
+            max_num = 1999
+            for item in existing:
+                oid = item[0]
+                suffix = str(oid)[len(prefix):]
+                if suffix.isdigit():
+                    max_num = max(max_num, int(suffix))
+            conn.execute("INSERT INTO order_id_sequences(order_date,last_num) VALUES(?,?)", (date_str, max_num))
+        conn.execute("UPDATE order_id_sequences SET last_num=last_num+1 WHERE order_date=?", (date_str,))
+        next_num = conn.execute("SELECT last_num FROM order_id_sequences WHERE order_date=?", (date_str,)).fetchone()[0]
+        conn.commit()
+    return f"{prefix}{int(next_num)}"
 
 
 def fmt_ugx(v):
@@ -2926,7 +2956,7 @@ def select_order(df, key, label="Select an order"):
     return d[d["_label"] == choice].iloc[0]
 
 
-def order_card(row, extra=None, show_image=True, show_comments=True):
+def order_card(row, extra=None, show_image=True):
     show_due_alert(row)
     ptype = row.get("product_type") or "Cake"
     is_short_pipeline = ptype in SHORT_PIPELINE_PRODUCTS
@@ -3049,7 +3079,7 @@ def order_card(row, extra=None, show_image=True, show_comments=True):
                 except Exception:
                     st.caption(f"Couldn't preview {vr['filename']} — file may be corrupted.")
 
-    if order_id_for_videos and show_comments:
+    if order_id_for_videos:
         try:
             render_order_comments(order_id_for_videos, key_suffix="card")
         except Exception as _e:
@@ -3271,6 +3301,36 @@ def staff_lists():
         get_staff_names("Decoration", FALLBACK_DECORATORS),
         get_staff_names("Dispatch / Driver", FALLBACK_DRIVERS),
     )
+
+def staff_lists_fast():
+    """Load all assignment rosters with one tiny DB query instead of five connections."""
+    with connect() as conn:
+        rows = conn.execute("SELECT full_name, departments FROM staff_accounts WHERE is_active='Yes'").fetchall()
+    def names_for(dept, fallback):
+        names = sorted({
+            r["full_name"] for r in rows
+            if r["departments"] and dept in [d.strip() for d in str(r["departments"]).split(",")]
+        })
+        return names if names else list(fallback)
+    return (
+        names_for("Baking", FALLBACK_BAKERS),
+        names_for("Filling / Piling", FALLBACK_PILERS),
+        names_for("Coating / Covering", FALLBACK_COVERERS),
+        names_for("Decoration", FALLBACK_DECORATORS),
+        names_for("Dispatch / Driver", FALLBACK_DRIVERS),
+    )
+
+
+def staff_workload_counts_from_df(df, staff_column):
+    """Fast per-rerun workload count using the already-loaded lightweight orders dataframe."""
+    if df.empty or staff_column not in df.columns:
+        return {}
+    active = df[df["workflow_status"].isin(ACTIVE_ASSIGNMENT_STATUSES)]
+    counts = {}
+    for value in active[staff_column].fillna("").astype(str):
+        for name in [n.strip() for n in value.replace(";", ",").split(",") if n.strip()]:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 ACTIVE_ASSIGNMENT_STATUSES = [
@@ -3667,7 +3727,8 @@ def render_customer_care():
         "Customer Phone *", key=phone_key,
         on_change=lambda: save_draft_field("nc_customer_phone", st.session_state.get(phone_key, "")))
 
-    with st.form("new_order_form", clear_on_submit=True):
+    order_form_gen = st.session_state.get("nc_order_form_gen", 0)
+    with st.form(f"new_order_form_{order_form_gen}", clear_on_submit=False):
         st.markdown("### Order Type")
         a,b = st.columns(2)
         order_type = a.selectbox("Order Type", ["Normal Order", "Urgent / Abrupt Order"])
@@ -3682,39 +3743,55 @@ def render_customer_care():
 
         if product_type == "Cake":
             st.markdown("### Topper Requirements")
-            topper_required = st.selectbox("Topper Needed?", ["No","Yes"], key="nc_topper_required")
+            topper_required = st.selectbox("Topper Needed?", ["No", "Yes"], key="nc_topper_required")
             topper_count = 0
-            topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = ""
+            topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = topper_3_wording = topper_3_notes = ""
             if topper_required == "Yes":
-                topper_count = st.selectbox("How many toppers does this cake need?", [1, 2], key="nc_topper_count")
-                st.markdown("**Topper 1**")
-                topper_1_wording = st.text_input("Words on Topper 1", key="nc_topper_1_wording")
-                topper_1_notes = st.text_area("Topper 1 Style / Design Notes", key="nc_topper_1_notes")
-                if int(topper_count) == 2:
-                    st.markdown("**Topper 2**")
-                    topper_2_wording = st.text_input("Words on Topper 2", key="nc_topper_2_wording")
-                    topper_2_notes = st.text_area("Topper 2 Style / Design Notes", key="nc_topper_2_notes")
-            # Keep the original combined fields populated so every existing topper queue,
-            # notification and report remains backward-compatible.
-            topper_wording_parts = []
-            topper_notes_parts = []
-            if topper_required == "Yes":
-                if topper_1_wording.strip(): topper_wording_parts.append(f"Topper 1: {topper_1_wording.strip()}")
-                if topper_1_notes.strip(): topper_notes_parts.append(f"Topper 1: {topper_1_notes.strip()}")
-                if int(topper_count or 0) == 2:
-                    if topper_2_wording.strip(): topper_wording_parts.append(f"Topper 2: {topper_2_wording.strip()}")
-                    if topper_2_notes.strip(): topper_notes_parts.append(f"Topper 2: {topper_2_notes.strip()}")
+                topper_count = st.number_input(
+                    "How many toppers does this cake need?", min_value=1, max_value=3, value=1, step=1, key="nc_topper_count",
+                    help="Use 1, 2 or 3. Each topper can have different wording/design instructions."
+                )
+                for topper_no in range(1, int(topper_count) + 1):
+                    st.markdown(f"**Topper {topper_no}**")
+                    wording = st.text_input(f"Words on Topper {topper_no}", key=f"nc_topper_{topper_no}_wording")
+                    notes = st.text_area(f"Topper {topper_no} Style / Design Notes", key=f"nc_topper_{topper_no}_notes")
+                    if topper_no == 1:
+                        topper_1_wording, topper_1_notes = wording, notes
+                    elif topper_no == 2:
+                        topper_2_wording, topper_2_notes = wording, notes
+                    else:
+                        topper_3_wording, topper_3_notes = wording, notes
+            # Keep the original combined fields populated so existing topper queues,
+            # notifications and reports remain backward-compatible.
+            topper_wording_parts, topper_notes_parts = [], []
+            for topper_no, wording, notes in [
+                (1, topper_1_wording, topper_1_notes),
+                (2, topper_2_wording, topper_2_notes),
+                (3, topper_3_wording, topper_3_notes),
+            ]:
+                if topper_no <= int(topper_count or 0):
+                    if str(wording).strip(): topper_wording_parts.append(f"Topper {topper_no}: {str(wording).strip()}")
+                    if str(notes).strip(): topper_notes_parts.append(f"Topper {topper_no}: {str(notes).strip()}")
             topper_wording = " | ".join(topper_wording_parts)
             topper_notes = " | ".join(topper_notes_parts)
 
             st.markdown("### Sticker Requirements")
-            sticker_required = st.selectbox("Does the cake need a sticker?", ["No","Yes"], key="nc_sticker_required")
-            sticker_notes = st.text_area("Sticker Design Notes (leave blank if no sticker)", key="nc_sticker_notes") if sticker_required == "Yes" else ""
-            # Stickers can be several; do not force a 1-or-2 count. Keep legacy count fields neutral.
-            sticker_count, sticker_1_notes, sticker_2_notes = 0, "", ""
+            sticker_required = st.selectbox("Does the cake need sticker(s)?", ["No", "Yes"], key="nc_sticker_required")
+            sticker_count = 0
+            sticker_notes = ""
+            if sticker_required == "Yes":
+                sticker_count = st.number_input(
+                    "How many stickers does this cake need?", min_value=1, max_value=20, value=1, step=1, key="nc_sticker_count",
+                    help="Enter the actual number needed. Stickers are not limited to two or three."
+                )
+                sticker_notes = st.text_area(
+                    "Sticker Design / Wording Notes", key="nc_sticker_notes",
+                    placeholder="Example: 3 logo stickers + 2 Happy Birthday stickers"
+                )
+            sticker_1_notes = sticker_2_notes = ""
         else:
             topper_required, topper_count = "No", 0
-            topper_wording = topper_notes = topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = ""
+            topper_wording = topper_notes = topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = topper_3_wording = topper_3_notes = ""
             sticker_required, sticker_count, sticker_1_notes, sticker_2_notes, sticker_notes = "No", 0, "", "", ""
 
         st.markdown("### Delivery Window")
@@ -3767,13 +3844,20 @@ def render_customer_care():
             needs_baking = st.selectbox("Does this need baking, or is it already-baked inventory being used?",
                                          ["Needs baking", "Already in inventory — skip baking"], key="nc_needs_baking_full")
 
-        bakers_nc, pilers_nc, coverers_nc, decorators_nc, _ = staff_lists()
-        baker_counts = staff_workload_counts("baker_assigned")
-        mixer_counts = staff_workload_counts("mixer_assigned")
-        oven_counts = staff_workload_counts("oven_person_assigned")
-        piler_counts = staff_workload_counts("piler_assigned")
-        coverer_counts = staff_workload_counts("coverer_assigned")
-        decorator_counts = staff_workload_counts("decorator_assigned")
+        bakers_nc, pilers_nc, coverers_nc, decorators_nc, _ = staff_lists_fast()
+        # The decorating team rotates through Piling and Covering week by week.
+        # Do not depend on each account's old department flags: every active decorator
+        # must always be available to Customer Care for all three production roles.
+        rotating_decorators = decorators_nc
+        pilers_nc = list(dict.fromkeys(list(pilers_nc) + list(rotating_decorators)))
+        coverers_nc = list(dict.fromkeys(list(coverers_nc) + list(rotating_decorators)))
+        decorators_nc = list(dict.fromkeys(list(decorators_nc) + list(rotating_decorators)))
+        baker_counts = staff_workload_counts_from_df(df, "baker_assigned")
+        mixer_counts = staff_workload_counts_from_df(df, "mixer_assigned")
+        oven_counts = staff_workload_counts_from_df(df, "oven_person_assigned")
+        piler_counts = staff_workload_counts_from_df(df, "piler_assigned")
+        coverer_counts = staff_workload_counts_from_df(df, "coverer_assigned")
+        decorator_counts = staff_workload_counts_from_df(df, "decorator_assigned")
 
         # Customer Care now plans the baking crew at order entry. The old routine
         # Customer Care -> Finance -> Production Planning -> Baking hop made every order
@@ -3822,7 +3906,10 @@ def render_customer_care():
                 st.error("Each side cake must have at least one flavour. Check side cake(s): " + ", ".join(incomplete_sides)); return
         if amount_paid > total_price: st.error("Amount paid cannot be greater than total price."); return
         if delivery_window_end <= delivery_window_start: st.error("Delivery window end must be after the start time."); return
-        if missing: st.error("Please complete: " + ", ".join(missing)); return
+        if missing:
+            st.error("⚠️ Missing information: " + ", ".join(missing))
+            st.info("Nothing you entered has been cleared. Add the missing information above, then press **Create New Order** again.")
+            return
         oversized = [v.name for v in (vids or []) if len(v.getbuffer()) > MAX_VIDEO_SIZE_BYTES]
         if oversized:
             st.error(f"These video(s) are over the {MAX_VIDEO_SIZE_BYTES // (1024*1024)}MB limit and can't be uploaded: "
@@ -3891,12 +3978,14 @@ def render_customer_care():
             "topper_notes": topper_notes.strip() if topper_required=="Yes" else "",
             "topper_1_wording": topper_1_wording.strip() if topper_required=="Yes" else "",
             "topper_1_notes": topper_1_notes.strip() if topper_required=="Yes" else "",
-            "topper_2_wording": topper_2_wording.strip() if (topper_required=="Yes" and int(topper_count or 0) == 2) else "",
-            "topper_2_notes": topper_2_notes.strip() if (topper_required=="Yes" and int(topper_count or 0) == 2) else "",
+            "topper_2_wording": topper_2_wording.strip() if (topper_required=="Yes" and int(topper_count or 0) >= 2) else "",
+            "topper_2_notes": topper_2_notes.strip() if (topper_required=="Yes" and int(topper_count or 0) >= 2) else "",
+            "topper_3_wording": topper_3_wording.strip() if (topper_required=="Yes" and int(topper_count or 0) >= 3) else "",
+            "topper_3_notes": topper_3_notes.strip() if (topper_required=="Yes" and int(topper_count or 0) >= 3) else "",
             "topper_status": ("Assigned" if (topper_required=="Yes" and not is_short_pipeline) else
                                ("Pending Assignment" if topper_required=="Yes" else "Not Required")),
             "topper_assigned_to": topper_owner_nc if (topper_required=="Yes" and not is_short_pipeline) else "",
-            "sticker_required": sticker_required, "sticker_count": 0,
+            "sticker_required": sticker_required, "sticker_count": int(sticker_count or 0),
             "sticker_notes": sticker_notes.strip() if sticker_required=="Yes" else "",
             "sticker_1_notes": "", "sticker_2_notes": "",
             "sticker_status": ("Assigned" if (sticker_required=="Yes" and not is_short_pipeline) else
@@ -3938,6 +4027,9 @@ def render_customer_care():
             pass  # sheet sync issues should never block order creation
         st.success(f"Order {order_id} created ({order_quantity} unit(s), total UGX {total_price:,.0f}) and sent to Finance."
                    + (" Fulfilled from cookie inventory." if sold_from_inventory == "Yes" else ""))
+        # Only reset the order form after a successful database insert. Failed validation
+        # leaves the same generation active, so Customer Care never loses what they typed.
+        st.session_state["nc_order_form_gen"] = st.session_state.get("nc_order_form_gen", 0) + 1
         clear_draft_field("nc_customer_name")
         clear_draft_field("nc_customer_phone")
         st.session_state["nc_customer_field_gen"] = st.session_state.get("nc_customer_field_gen", 0) + 1
@@ -5644,7 +5736,7 @@ def render_design_innovation():
         c.metric("Due Soon",int((q["topper_urgency"]=="🟡 DUE SOON").sum()))
         d.metric("Normal Time",int((q["topper_urgency"]=="🟢 NORMAL TIME").sum()))
         st.markdown("### Topper Priority Queue")
-        topper_cols = [c for c in ["topper_urgency","order_id","customer_name","topper_count","topper_1_wording","topper_2_wording","decorator_assigned","due_date","expected_time","topper_target_display","topper_status","topper_assigned_to"] if c in q.columns]
+        topper_cols = [c for c in ["topper_urgency","order_id","customer_name","topper_count","topper_1_wording","topper_2_wording","topper_3_wording","decorator_assigned","due_date","expected_time","topper_target_display","topper_status","topper_assigned_to"] if c in q.columns]
         st.dataframe(q[topper_cols],hide_index=True,width='stretch')
         active=q[~q["topper_status"].isin(["Ready","Received by Decorator"])]
         row=select_order(active,"topper_task") if not active.empty else None
@@ -5656,6 +5748,8 @@ def render_design_innovation():
                             ("Topper 1 Notes",row.get("topper_1_notes") or row.get("topper_notes")),
                             ("Topper 2 Words",row.get("topper_2_wording")),
                             ("Topper 2 Notes",row.get("topper_2_notes")),
+                            ("Topper 3 Words",row.get("topper_3_wording")),
+                            ("Topper 3 Notes",row.get("topper_3_notes")),
                             ("Decorator",row.get("decorator_assigned")),("Urgency",topper_urgency(row)),("Status",row.get("topper_status"))])
             render_stage_material_planning("Design & Innovation", row, row.get("topper_assigned_to"), key_prefix="topper")
             by=st.text_input("Updated by",value=disp(row.get("topper_assigned_to")) if disp(row.get("topper_assigned_to"))!="—" else "Keith")
@@ -5682,7 +5776,8 @@ def render_design_innovation():
         if srow is None:
             st.success("All sticker tasks are completed.")
         else:
-            order_card(srow, [("Sticker Notes", srow.get("sticker_notes")),
+            order_card(srow, [("Number of Stickers", srow.get("sticker_count") or 1),
+                              ("Sticker Notes", srow.get("sticker_notes")),
                               ("Decorator", srow.get("decorator_assigned")), ("Status", srow.get("sticker_status"))])
             render_stage_material_planning("Design & Innovation", srow, srow.get("sticker_assigned_to"), key_prefix="sticker")
             sby = st.text_input("Updated by", value=disp(srow.get("sticker_assigned_to")) if disp(srow.get("sticker_assigned_to")) != "—" else "Doreen", key="sticker_updated_by")
@@ -5838,15 +5933,15 @@ def render_simple_view(department_label, staff_column, role_label, incoming_stat
                         started_field, completed_field, materials_stage, materials_required=True):
     """Fast, phone-first production queue.
 
-    The queue is always sorted most urgent first and shown as a horizontal swipe strip, so
-    Bakers/Pilers/Coverers/Decorators can move between cakes the same way they scan WhatsApp.
+    The queue is always sorted most urgent first and shown four cakes at a time, so
+    Bakers/Pilers/Coverers/Decorators can move through work without hidden horizontal scrolling.
     Only the selected cake is rendered in full, which keeps cheap phones from loading every
     image and every order card at once.
     """
     my_name = st.session_state.get("staff_name", "").strip()
     is_hod = st.session_state.get("is_hod")
 
-    # Phone-first CSS: one horizontal urgency strip + large touch targets.  The rules are
+    # Phone-first CSS: large touch targets.  The rules are
     # intentionally scoped to this simple view so the admin/full dashboards stay unchanged.
     st.markdown("""
     <style>
@@ -5929,18 +6024,75 @@ def render_simple_view(department_label, staff_column, role_label, incoming_stat
         when = due_short + ((" " + tm) if tm != "—" else "")
         return f"{urgent}{order_id} • {when}"
 
-    st.markdown(f"**🔥 WORK QUEUE — {len(mine)} cake(s), most urgent first. Swipe left/right.**")
-    selected_id = st.radio(
-        "Urgency queue",
-        queue_ids,
-        key=pick_key,
-        horizontal=True,
-        label_visibility="collapsed",
-        format_func=_queue_label,
-    )
-    row = by_id[str(selected_id)]
-    position = queue_ids.index(str(selected_id)) + 1
-    st.caption(f"Cake {position} of {len(queue_ids)} • The first cake is always the most urgent.")
+    # Keep the production queue impossible to "lose" on small phones. Streamlit's horizontal
+    # radio can preserve its scrollbar position after a rerun, which means the selected cake
+    # may exist but be off-screen. Show four cakes at a time instead, with explicit page controls.
+    # This is slightly less flashy than an endless swipe strip, but much safer for low-end phones.
+    page_size = 4
+    page_key = f"simple_queue_page_{department_label}"
+    total_pages = max(1, (len(queue_ids) + page_size - 1) // page_size)
+
+    # If the selected cake changed because of a notification / live refresh, move to the page
+    # containing that cake so the worker always sees what the app says is selected.
+    selected_now = str(st.session_state.get(pick_key) or queue_ids[0])
+    if selected_now not in queue_ids:
+        selected_now = queue_ids[0]
+        st.session_state[pick_key] = selected_now
+    selected_index = queue_ids.index(selected_now)
+    wanted_page = selected_index // page_size
+
+    current_page = int(st.session_state.get(page_key, wanted_page))
+    if current_page < 0 or current_page >= total_pages:
+        current_page = wanted_page
+    # When selection has moved to another page externally, follow it automatically.
+    if not (current_page * page_size <= selected_index < min((current_page + 1) * page_size, len(queue_ids))):
+        current_page = wanted_page
+    st.session_state[page_key] = current_page
+
+    st.markdown(f"**🔥 WORK QUEUE — {len(mine)} cake(s), most urgent first.**")
+    st.caption(f"Showing cakes {current_page * page_size + 1}–{min((current_page + 1) * page_size, len(queue_ids))} of {len(queue_ids)}")
+
+    start = current_page * page_size
+    visible_ids = queue_ids[start:start + page_size]
+
+    for absolute_idx, order_id in enumerate(visible_ids, start=start + 1):
+        label = _queue_label(order_id)
+        selected_marker = "✅ " if str(order_id) == selected_now else ""
+        if st.button(
+            f"{selected_marker}{absolute_idx}. {label}",
+            key=f"queue_pick_btn_{department_label}_{order_id}",
+            use_container_width=True,
+            type="primary" if str(order_id) == selected_now else "secondary",
+        ):
+            st.session_state[pick_key] = str(order_id)
+            st.session_state[page_key] = (absolute_idx - 1) // page_size
+            st.rerun()
+
+    nav_left, nav_mid, nav_right = st.columns([1, 1.25, 1])
+    with nav_left:
+        if st.button("◀ Previous 4", key=f"queue_prev_{department_label}", use_container_width=True,
+                     disabled=current_page <= 0):
+            new_page = max(0, current_page - 1)
+            st.session_state[page_key] = new_page
+            st.session_state[pick_key] = queue_ids[new_page * page_size]
+            st.rerun()
+    with nav_mid:
+        st.markdown(
+            f"<div style='text-align:center;padding:.8rem .1rem;font-weight:700;'>Page {current_page + 1} of {total_pages}</div>",
+            unsafe_allow_html=True,
+        )
+    with nav_right:
+        if st.button("Next 4 ▶", key=f"queue_next_{department_label}", use_container_width=True,
+                     disabled=current_page >= total_pages - 1):
+            new_page = min(total_pages - 1, current_page + 1)
+            st.session_state[page_key] = new_page
+            st.session_state[pick_key] = queue_ids[new_page * page_size]
+            st.rerun()
+
+    selected_id = str(st.session_state.get(pick_key) or queue_ids[0])
+    row = by_id[selected_id]
+    position = queue_ids.index(selected_id) + 1
+    st.caption(f"Selected: Cake {position} of {len(queue_ids)} • The first cake is always the most urgent.")
 
     # Match the team's familiar WhatsApp rhythm: photo first, then a short readable job sheet.
     has_image = render_reference_images(row)
@@ -7496,7 +7648,7 @@ def render_sidebar():
         st.rerun()
 
     forced_page = st.session_state.pop("_force_page", None)
-    if forced_page == "Team Chat & AI" or st.session_state.get("_open_order_thread"):
+    if forced_page == "Team Chat & AI":
         return "Team Chat & AI"
 
     allowed = st.session_state.get("departments") or [st.session_state.department]
