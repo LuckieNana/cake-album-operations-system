@@ -3777,6 +3777,31 @@ def render_customer_care():
             topper_wording = " | ".join(topper_wording_parts)
             topper_notes = " | ".join(topper_notes_parts)
 
+    # Sticker controls also live OUTSIDE the form so the visible page order is guaranteed:
+    # Topper Requirements -> Sticker Requirements -> Order Type.
+    # Keeping both requirement sections in the same Streamlit container prevents the
+    # browser from visually placing the form's Sticker section after Order Type.
+    sticker_required, sticker_count = "No", 0
+    sticker_1_notes = sticker_2_notes = sticker_notes = ""
+    if product_type == "Cake":
+        st.markdown("### Sticker Requirements")
+        sticker_required = st.selectbox(
+            "Does the cake need sticker(s)?", ["No", "Yes"], key="nc_sticker_required"
+        )
+        if sticker_required == "Yes":
+            sticker_count = st.number_input(
+                "How many stickers does this cake need?",
+                min_value=1, max_value=20, value=1, step=1, key="nc_sticker_count",
+                help="Enter the actual number needed. Stickers are not limited to two or three."
+            )
+            sticker_notes = st.text_area(
+                "Sticker Design / Wording Notes", key="nc_sticker_notes",
+                placeholder="Example: 3 logo stickers + 2 Happy Birthday stickers"
+            )
+    else:
+        topper_required, topper_count = "No", 0
+        topper_wording = topper_notes = topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = topper_3_wording = topper_3_notes = ""
+
     order_form_gen = st.session_state.get("nc_order_form_gen", 0)
     with st.form(f"new_order_form_{order_form_gen}", clear_on_submit=False):
         st.markdown("### Order Type")
@@ -3790,26 +3815,6 @@ def render_customer_care():
                                  help="Upload more than one if the instructions call for combining ideas from different images (e.g. one for the cake, another for the topper style).")
         vids = st.file_uploader("Customer Reference Video(s)", type=["mp4","mov","webm","m4v"], accept_multiple_files=True,
                                  help="For clients who send a short video instead of (or alongside) photos.")
-
-        if product_type == "Cake":
-            st.markdown("### Sticker Requirements")
-            sticker_required = st.selectbox("Does the cake need sticker(s)?", ["No", "Yes"], key="nc_sticker_required")
-            sticker_count = 0
-            sticker_notes = ""
-            if sticker_required == "Yes":
-                sticker_count = st.number_input(
-                    "How many stickers does this cake need?", min_value=1, max_value=20, value=1, step=1, key="nc_sticker_count",
-                    help="Enter the actual number needed. Stickers are not limited to two or three."
-                )
-                sticker_notes = st.text_area(
-                    "Sticker Design / Wording Notes", key="nc_sticker_notes",
-                    placeholder="Example: 3 logo stickers + 2 Happy Birthday stickers"
-                )
-            sticker_1_notes = sticker_2_notes = ""
-        else:
-            topper_required, topper_count = "No", 0
-            topper_wording = topper_notes = topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = topper_3_wording = topper_3_notes = ""
-            sticker_required, sticker_count, sticker_1_notes, sticker_2_notes, sticker_notes = "No", 0, "", "", ""
 
         st.markdown("### Delivery Window")
         st.caption("The time range the customer expects delivery within — used by Dispatch/Driver.")
