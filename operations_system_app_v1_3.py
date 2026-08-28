@@ -4153,6 +4153,44 @@ def render_customer_care():
         topper_wording = topper_notes = topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = topper_3_wording = topper_3_notes = ""
 
     order_form_gen = st.session_state.get("nc_order_form_gen", 0)
+
+    # Keep media uploaders OUTSIDE the form. Streamlit forms batch widget changes, so a
+    # file selected inside a form does not trigger the rerun needed to draw an immediate
+    # preview. Customer Care needs to see the customer's design before submitting.
+    st.markdown("### Customer Reference Media")
+    imgs = st.file_uploader(
+        "Customer Reference Image(s)",
+        type=["jpg", "jpeg", "png", "heic", "heif"],
+        accept_multiple_files=True,
+        key=f"nc_reference_images_{order_form_gen}",
+        help="Select JPG, PNG, HEIC or HEIF photos. The picture will appear immediately below so you can read wording and design details before creating the order.",
+    )
+    if imgs:
+        st.success(f"✅ {len(imgs)} photo(s) selected.")
+        st.markdown("#### 👀 Customer design preview")
+        for img_no, uploaded_img in enumerate(imgs, 1):
+            try:
+                preview_bytes, _, _ = _prepare_uploaded_reference_image(
+                    uploaded_img, max_dimension=1400, jpeg_quality=85)
+                st.image(
+                    preview_bytes,
+                    caption=f"Reference photo {img_no} — {getattr(uploaded_img, 'name', 'photo')}",
+                    width='stretch')
+            except Exception as preview_exc:
+                st.warning(
+                    f"Photo {img_no} was uploaded but could not be previewed on this device. "
+                    f"It can still be attached when the order is created. Details: {preview_exc}")
+
+    vids = st.file_uploader(
+        "Customer Reference Video(s)",
+        type=["mp4", "mov", "m4v", "webm", "3gp"],
+        accept_multiple_files=True,
+        key=f"nc_reference_videos_{order_form_gen}",
+        help="Select customer reference videos separately. Maximum 150MB per video.",
+    )
+    if vids:
+        st.caption(f"✅ {len(vids)} video(s) selected. They will be attached when you create the order.")
+
     with st.form(f"new_order_form_{order_form_gen}", clear_on_submit=False):
         st.markdown("### Order Type")
         a,b = st.columns(2)
@@ -4161,46 +4199,6 @@ def render_customer_care():
                                       index=1 if order_type == "Urgent / Abrupt Order" else 0)
 
         design = st.text_area("Description of Design *" if product_type not in SHORT_PIPELINE_PRODUCTS else "Order Notes *")
-        # Do not use Streamlit's extension filter here. On iPhone/Safari, Photos can
-        # provide a valid image with an unusual or missing filename extension. A strict
-        # `type=[...]` filter can therefore show Streamlit's red caution icon before the
-        # file reaches Python. Accept first; validate by extension/MIME/file signature
-        # when Create New Order is pressed.
-        imgs = st.file_uploader(
-            "Customer Reference Image(s)",
-            accept_multiple_files=True,
-            key=f"nc_reference_images_{order_form_gen}",
-            help="iPhone and Android photos are accepted, including HEIC/HEIF. Select the photo normally; the app validates and compresses it after upload.",
-        )
-        if imgs:
-            st.success(f"✅ {len(imgs)} photo(s) selected. They will be attached when you create the order.")
-            st.markdown("#### 👀 Reference image preview")
-            st.caption("Customer Care can review the actual picture here before saving the order — useful for reading wording, colours and other design details.")
-            for img_no, uploaded_img in enumerate(imgs, 1):
-                try:
-                    ok_img, reason_img = _looks_like_supported_phone_image(uploaded_img)
-                    if ok_img:
-                        preview_bytes, _, _ = _prepare_uploaded_reference_image(
-                            uploaded_img, max_dimension=1100, jpeg_quality=78)
-                        st.image(
-                            preview_bytes,
-                            caption=f"Reference photo {img_no} — {getattr(uploaded_img, 'name', 'photo')}",
-                            width='stretch')
-                    else:
-                        st.warning(f"Photo {img_no} could not be previewed yet: {reason_img}")
-                except Exception as preview_exc:
-                    st.warning(f"Photo {img_no} uploaded, but the preview could not be created: {preview_exc}")
-        # Do not use Streamlit's extension filter here. Safari sometimes supplies iPhone
-        # videos with a generic/odd filename even though the MIME type is valid, which can
-        # make the red upload warning appear before Python ever receives the file.
-        vids = st.file_uploader(
-            "Customer Reference Video(s)",
-            accept_multiple_files=True,
-            key=f"nc_reference_videos_{order_form_gen}",
-            help="iPhone and Android videos are accepted. Choose the video directly from Photos/Files. MOV, MP4, M4V, WebM and 3GP are supported; maximum 150MB per video.",
-        )
-        if vids:
-            st.caption(f"✅ {len(vids)} video(s) selected. They will be attached when you create the order.")
 
         st.markdown("### Delivery Window")
         st.caption("The time range the customer expects delivery within — used by Dispatch/Driver.")
