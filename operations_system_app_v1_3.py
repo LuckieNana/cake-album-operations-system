@@ -3743,24 +3743,33 @@ def render_customer_care():
 
         if product_type == "Cake":
             st.markdown("### Topper Requirements")
-            topper_required = st.selectbox("Topper Needed?", ["No", "Yes"], key="nc_topper_required")
-            topper_count = 0
+            # IMPORTANT: this section sits inside the main Streamlit form. Widgets inside a form
+            # do not trigger an immediate rerun, so a conditional "Topper Needed? -> show count"
+            # made the count look like it was missing. Keep the count visible at all times.
+            topper_count = st.selectbox(
+                "How many toppers does this cake need?",
+                [0, 1, 2, 3],
+                index=0,
+                key="nc_topper_count",
+                help="Choose 0 for no topper, or 1, 2, or 3 toppers."
+            )
+            topper_required = "Yes" if int(topper_count or 0) > 0 else "No"
             topper_1_wording = topper_1_notes = topper_2_wording = topper_2_notes = topper_3_wording = topper_3_notes = ""
-            if topper_required == "Yes":
-                topper_count = st.number_input(
-                    "How many toppers does this cake need?", min_value=1, max_value=3, value=1, step=1, key="nc_topper_count",
-                    help="Use 1, 2 or 3. Each topper can have different wording/design instructions."
-                )
-                for topper_no in range(1, int(topper_count) + 1):
-                    st.markdown(f"**Topper {topper_no}**")
-                    wording = st.text_input(f"Words on Topper {topper_no}", key=f"nc_topper_{topper_no}_wording")
-                    notes = st.text_area(f"Topper {topper_no} Style / Design Notes", key=f"nc_topper_{topper_no}_notes")
-                    if topper_no == 1:
-                        topper_1_wording, topper_1_notes = wording, notes
-                    elif topper_no == 2:
-                        topper_2_wording, topper_2_notes = wording, notes
-                    else:
-                        topper_3_wording, topper_3_notes = wording, notes
+
+            # Render all three topper detail slots so the form remains responsive even though
+            # Streamlit form widgets do not rerun until submission. Customer Care only fills
+            # the number selected above; unused slots are ignored when saving.
+            st.caption("If you select 1, fill Topper 1 only. If 2, fill Topper 1 & 2. If 3, fill all three.")
+            for topper_no in range(1, 4):
+                st.markdown(f"**Topper {topper_no}**")
+                wording = st.text_input(f"Words on Topper {topper_no}", key=f"nc_topper_{topper_no}_wording")
+                notes = st.text_area(f"Topper {topper_no} Style / Design Notes", key=f"nc_topper_{topper_no}_notes")
+                if topper_no == 1:
+                    topper_1_wording, topper_1_notes = wording, notes
+                elif topper_no == 2:
+                    topper_2_wording, topper_2_notes = wording, notes
+                else:
+                    topper_3_wording, topper_3_notes = wording, notes
             # Keep the original combined fields populated so existing topper queues,
             # notifications and reports remain backward-compatible.
             topper_wording_parts, topper_notes_parts = [], []
